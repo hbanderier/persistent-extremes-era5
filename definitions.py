@@ -19,7 +19,7 @@ def _fn(date, which):
         return filenamecp(date.year, date.month, date.day)
     else:
         return filenamegeneric(date.year, date.month, which)
-    
+        
 def fn(date, which):  # instead takes pandas.timestamp (or iterable of _) as input
     if isinstance(date, (list, np.ndarray, pd.DatetimeIndex)):
         filenames = []
