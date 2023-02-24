@@ -1,8 +1,11 @@
+import os
+import glob
 import platform
 import numpy as np
 import pandas as pd
 import xarray as xr
 import xrft
+import pickle as pkl
 import scipy.constants as co
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
@@ -17,6 +20,7 @@ import cartopy.feature as feat
 from scipy.stats import gaussian_kde, norm as normal_dist
 from typing import Union, Any
 from nptyping import NDArray, Object, Shape
+from sklearn.cluster import KMeans
 
 
 pf = platform.platform()
@@ -33,8 +37,8 @@ CLIMSTOR = "/mnt/climstor/ecmwf/era5/raw"
 
 
 def filenamesml(
-    y, m, d
-):  # Naming conventions of the files on climstor (why are they so different?)
+    y: str, m: str, d: str
+) -> str:  # Naming conventions of the files on climstor (why are they so different?)
     return [
         f"{CLIMSTOR}/ML/data/{str(y)}/P{str(y)}{str(m).zfill(2)}{str(d).zfill(2)}_{str(h).zfill(2)}"
         for h in range(0, 24, 6)
@@ -42,41 +46,45 @@ def filenamesml(
 
 
 def filenamessfc(
-    y, m, d
-):  # Naming conventions of the files on climstor (why are they so different?)
+    y: str, m: str, d: str
+) -> str:  # Naming conventions of the files on climstor (why are they so different?)
     return [
         f"{CLIMSTOR}/SFC/data/an_sfc_ERA5_{str(y)}-{str(m).zfill(2)}-{str(d).zfill(2)}.nc"
-    ] 
+    ]
 
 
-def filenamespl(y, m, d):
+def filenamespl(
+    y: str, m: str, d: str
+) -> str:
     return [
         f"{CLIMSTOR}/PL/data/an_pl_ERA5_{str(y)}-{str(m).zfill(2)}-{str(d).zfill(2)}.nc"
     ]  # returns iterable to have same call signature as filenamescl(y, m, d)
 
 
-def filenamegeneric(y, m, folder):
+def filenamegeneric(
+    y: str, m: str, folder: str
+) -> str:
     return [f"{DATADIR}/{folder}/{y}{str(m).zfill(2)}.nc"]
 
 
-def _fn(date, which):
+def _fn(date: pd.Timestamp, which: str) -> str:
     if which == "ML":
         return filenamesml(date.year, date.month, date.day)
     elif which == "PL":
-        return filenamespl(date.year, date.month, date.day)    
+        return filenamespl(date.year, date.month, date.day)
     elif which == "SFC":
         return filenamessfc(date.year, date.month, date.day)
     else:
         return filenamegeneric(date.year, date.month, which)
 
 
-def fn(date, which):  # instead takes pandas.timestamp (or iterable of _) as input
-    if isinstance(date, (list, NDArray, pd.DatedayIndex)):
+def fn(date: Union[list, NDArray, pd.DatetimeIndex, pd.Timestamp], which):  # instead takes pandas.timestamp (or iterable of _) as input
+    if isinstance(date, (list, NDArray, pd.DatetimeIndex)):
         filenames = []
         for d in date:
             filenames.extend(_fn(d, which))
         return filenames
-    elif isinstance(date, pd.daystamp):
+    elif isinstance(date, pd.Timestamp):
         return _fn(date, which)
     else:
         raise TypeError(f"Invalid type : {type(date)}")
@@ -88,11 +96,11 @@ KAPPA = 0.2854
 R_SPECIFIC_AIR = 287.0500676
 
 
-def degcos(x):
+def degcos(x: float) -> float:
     return np.cos(x / 180 * np.pi)
 
 
-def degsin(x):
+def degsin(x: float) -> float:
     return np.sin(x / 180 * np.pi)
 
 
@@ -234,6 +242,7 @@ def clusterplot(
         if clabels:
             axes[i].clabel(cs)
     cbar = fig.colorbar(im, ax=axes.ravel().tolist(), spacing="proportional")
+    cbar.ax.set_yticks(levels0)
     if cbar_ylabel is not None:
         cbar.ax.set_ylabel(cbar_ylabel)
     return fig, axes, cbar
@@ -258,7 +267,9 @@ def cdf(timeseries: Union[xr.DataArray, NDArray]) -> tuple[NDArray, NDArray]:
 
 
 ### Create histogram
-def compute_hist(timeseries: xr.DataArray, season: str = None, bins: Union[NDArray, list] = LATBINS) -> tuple[NDArray, NDArray]:
+def compute_hist(
+    timeseries: xr.DataArray, season: str = None, bins: Union[NDArray, list] = LATBINS
+) -> tuple[NDArray, NDArray]:
     """small wrapper for np.histogram that extracts a season out of xr.DataArray
 
     Args:
@@ -275,7 +286,13 @@ def compute_hist(timeseries: xr.DataArray, season: str = None, bins: Union[NDArr
     return np.histogram(timeseries, bins=bins)
 
 
-def histogram(timeseries: xr.DataArray, ax: Axes, season: str = None, bins: Union[NDArray, list]=LATBINS, **kwargs) -> BarContainer:
+def histogram(
+    timeseries: xr.DataArray,
+    ax: Axes,
+    season: str = None,
+    bins: Union[NDArray, list] = LATBINS,
+    **kwargs,
+) -> BarContainer:
     """Small wrapper to plot a histogram out of a time series
 
     Args:
@@ -293,11 +310,20 @@ def histogram(timeseries: xr.DataArray, ax: Axes, season: str = None, bins: Unio
     return bars
 
 
-def kde(timeseries: xr.DataArray, season: str = None, bins: Union[NDArray, list]=LATBINS, scaled: bool = False, return_x: bool = False, **kwargs) -> Union[NDArray, tuple[NDArray, NDArray]]:
+def kde(
+    timeseries: xr.DataArray,
+    season: str = None,
+    bins: Union[NDArray, list] = LATBINS,
+    scaled: bool = False,
+    return_x: bool = False,
+    **kwargs,
+) -> Union[NDArray, tuple[NDArray, NDArray]]:
     hist = compute_hist(timeseries, season, bins)
     midpoints = (hist[1][1:] + hist[1][:-1]) / 2
     norm = (hist[1][1] - hist[1][0]) * np.sum(hist[0])
-    kde: NDArray = gaussian_kde(midpoints, weights=hist[0], **kwargs).evaluate(midpoints)
+    kde: NDArray = gaussian_kde(midpoints, weights=hist[0], **kwargs).evaluate(
+        midpoints
+    )
     if scaled:
         kde *= norm
     if return_x:
@@ -309,7 +335,9 @@ def compute_anomaly(
     ds: xr.DataArray,
     return_clim: bool = False,
     smooth_kmax: bool = None,
-) -> Union[xr.DataArray, tuple[xr.DataArray, xr.DataArray]]: # https://github.com/pydata/xarray/issues/3575
+) -> Union[
+    xr.DataArray, tuple[xr.DataArray, xr.DataArray]
+]:  # https://github.com/pydata/xarray/issues/3575
     """computes daily anomalies extracted using a (possibly smoothed) climatology
 
     Args:
@@ -338,36 +366,74 @@ def compute_anomaly(
     return anom
 
 
-def detrend(dataset: str, variable: str, level: str, region: str, name: str = "full.nc") -> str:
-    """creates a detrended dataset out of the specs 
+def detrend(
+    dataset: str, variable: str, level: str, region: str, smallname: str = None, name: str = "full.nc"
+) -> str:
+    """creates a detrended dataset out of the specs
 
     Args:
-        dataset (str): NCEP, ERA40, ERA5,  
+        dataset (str): NCEP, ERA40, ERA5,
         variable (str):
         level (str): p level
         region (str): North_Atlantic or full (dailymean)
+        smallname (str): variable name in the dataset. Defaults to SMALLNAME[variable] (see definition)
         name (str, optional): _description_. Defaults to "full.nc".
 
     Returns:
         str: path of the detrended file for ease of access
     """
     path = f"{DATADIR}/{dataset}/{variable}/{level}/{region}"
-    ds = (
-        xr.open_dataset(f"{path}/{name}")
-        .rename({"longitude": "lon", "latitude": "lat"})
-        .isel(lon=np.arange(241), lat=np.arange(30, 131))
-    )
-    smallname = SMALLNAME[variable]
+    ds = xr.open_dataset(f"{path}/{name}").rename({"longitude": "lon", "latitude": "lat"})
+    if smallname is None:
+        smallname = SMALLNAME[variable]
     if variable == "Geopotential":
         ds["z"] /= co.g
-    da = ds[smallname].chunk({"time": -1, "lon": 121})
+    da = ds[smallname].chunk({"time": -1, "lon": 41})
     anomaly = xr.map_blocks(compute_anomaly, da, template=da)
     detrended = xr.map_blocks(
         xrft.detrend, anomaly, args=("time", "linear"), template=da
     )
-    anomaly.to_netcdf(f"{path}/anomaly.nc")
-    detrended.to_netcdf(f"{DATADIR}/detrended.nc")
+    anomaly.to_netcdf(f"{path}/{smallname}_anomaly.nc")
+    detrended.to_netcdf(f"{path}/{smallname}_detrended.nc")
     return path
+
+
+def create_grid_directory(
+    cdo, dataset: str, variable: str, level: str,
+    minlon: float, maxlon: float, minlat: float, maxlat: float
+) -> str:
+    basepath = f"{DATADIR}/{dataset}/{variable}/{level}"
+    newdir = f"box_{minlon}_{maxlon}_{minlat}_{maxlat}"
+    path = f"{basepath}/{newdir}"
+    if os.path.isdir(path):
+        return path
+    os.mkdir(path)
+    for basefile in ["detrended.nc", "anomaly.nc"]:
+        filelist = glob.glob(f"{basepath}/dailymean/*_{basefile}")
+        for ifile in filelist:
+            ofile = f"{path}/{ifile.split('/')[-1]}"
+            # print(ifile, ofile)
+            cdo.sellonlatbox(
+                minlon, maxlon, minlat, maxlat, input=ifile, output=ofile
+            )
+    return path
+
+
+def do_kmeans(
+    n_clu: int, path: str, smallname: str, season = "JJA", detrended = False, weigh: str = "sqrtcos"
+) -> str:
+    midname = "detrended" if detrended else "anomaly"
+    da = xr.open_dataarray(f"{path}/{smallname}_{midname}.nc")
+    if weigh=="sqrtcos":
+        da *= np.sqrt(degcos(da.lat))
+    elif weigh=="cos":
+        da *= degcos(da.lat)
+    tbt = da.values.reshape(len(da.time), -1)
+    results = KMeans(n_clu, n_init="auto").fit(tbt)
+    pklpath = f"{path}/k{n_clu}_{midname}_{season}_{weigh}.pkl"
+    with open(pklpath, "wb") as handle:
+        pkl.dump(results, handle)
+    return pklpath
 
 
 ### Lat and Int
@@ -392,7 +458,9 @@ def compute_JLI(da_Lat: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
 
 
 ### Shar, Latn, Lats,
-def compute_shar(da_Lat: xr.DataArray, Int: xr.DataArray, Lat: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
+def compute_shar(
+    da_Lat: xr.DataArray, Int: xr.DataArray, Lat: xr.DataArray
+) -> tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
     """Computes sharpness and south + north latitudinal extent of the jet
 
     Args:
@@ -429,8 +497,10 @@ def compute_shar(da_Lat: xr.DataArray, Int: xr.DataArray, Lat: xr.DataArray) -> 
 
 
 ### Tilt
-def compute_Tilt(da: xr.DataArray, Lat: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
-    """Computes tilt and also returns the tracked latitudes 
+def compute_Tilt(
+    da: xr.DataArray, Lat: xr.DataArray
+) -> tuple[xr.DataArray, xr.DataArray]:
+    """Computes tilt and also returns the tracked latitudes
 
     Args:
         da (xr.DataArray): _description_
@@ -476,7 +546,9 @@ def compute_Tilt(da: xr.DataArray, Lat: xr.DataArray) -> tuple[xr.DataArray, xr.
 
 
 ### Lon
-def compute_Lon(da: xr.DataArray, trackedLats: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
+def compute_Lon(
+    da: xr.DataArray, trackedLats: xr.DataArray
+) -> tuple[xr.DataArray, xr.DataArray]:
     """_summary_
 
     Args:
