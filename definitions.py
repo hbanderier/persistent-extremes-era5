@@ -10,6 +10,7 @@ import scipy.constants as co
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.path as mpath
+import matplotlib.ticker as mticker
 from matplotlib.colors import BoundaryNorm
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
@@ -173,6 +174,7 @@ def clusterplot(
     cbar_extent: float,
     cbar_ylabel: str = None,
     clabels: bool = False,
+    draw_labels: bool = False,
     cmap: str = "seismic",
 ) -> tuple[Figure, NDArray[Any, Object], Colorbar]:
     """Creates nice layout of plots with a common colorbar and color normalization
@@ -185,6 +187,7 @@ def clusterplot(
         cbar_extent (float): _description_
         cbar_ylabel (str, optional): _description_. Defaults to None.
         clabels (bool, optional): _description_. Defaults to False.
+        draw_labels: (bool, optional). Whether to draw labels. Defaults to False
         cmap (str, optional): _description_. Defaults to "seismic".
 
     Returns:
@@ -241,6 +244,26 @@ def clusterplot(
         axes[i].add_feature(BORDERS)
         if clabels:
             axes[i].clabel(cs)
+        if draw_labels:
+            gl = axes[i].gridlines(
+                dms=False, x_inline=False, y_inline=False, draw_labels=True
+            )
+            gl.xlocator = mticker.FixedLocator([-90, -60, -30, 0, 30, 60])
+            gl.ylocator = mticker.FixedLocator([40, 50, 60, 70])
+            gl.xlines = False
+            gl.ylines = False
+            plt.draw()
+            for ea in gl.label_artists:
+                current_pos = ea.get_position()
+                if ea.get_text()[-1] in ['N', 'S']:
+                    ea.set_visible(True)
+                    continue
+                if current_pos[1] > 4000000:
+                    ea.set_visible(False)
+                    continue
+                ea.set_visible(True)
+                ea.set_rotation(0)
+                ea.set_position([current_pos[0], current_pos[1] - 200000])
     cbar = fig.colorbar(im, ax=axes.ravel().tolist(), spacing="proportional")
     cbar.ax.set_yticks(levels0)
     if cbar_ylabel is not None:
