@@ -22,6 +22,7 @@ from scipy.stats import gaussian_kde, norm as normal_dist
 from typing import Union, Any
 from nptyping import NDArray, Object, Shape
 from sklearn.cluster import KMeans
+from kmedoids import KMedoids
 
 
 pf = platform.platform()
@@ -34,11 +35,11 @@ else:  # find better later
 DATADIR = (
     "/scratch/snx3000/hbanderi/data/persistent" if NODE == "daint" else "/scratch2/hugo"
 )
-CLIMSTOR = "/mnt/climstor/ecmwf/era5/raw"
+CLIMSTOR = "/mnt/climstor/ecmwf/era5-new/raw"
 
 
 def filenamesml(
-    y: str, m: str, d: str
+    y: int, m: int, d: int
 ) -> str:  # Naming conventions of the files on climstor (why are they so different?)
     return [
         f"{CLIMSTOR}/ML/data/{str(y)}/P{str(y)}{str(m).zfill(2)}{str(d).zfill(2)}_{str(h).zfill(2)}"
@@ -47,7 +48,7 @@ def filenamesml(
 
 
 def filenamessfc(
-    y: str, m: str, d: str
+    y: int, m: int, d: int
 ) -> str:  # Naming conventions of the files on climstor (why are they so different?)
     return [
         f"{CLIMSTOR}/SFC/data/an_sfc_ERA5_{str(y)}-{str(m).zfill(2)}-{str(d).zfill(2)}.nc"
@@ -55,7 +56,7 @@ def filenamessfc(
 
 
 def filenamespl(
-    y: str, m: str, d: str
+    y: int, m: int, d: int
 ) -> str:
     return [
         f"{CLIMSTOR}/PL/data/an_pl_ERA5_{str(y)}-{str(m).zfill(2)}-{str(d).zfill(2)}.nc"
@@ -63,7 +64,7 @@ def filenamespl(
 
 
 def filenamegeneric(
-    y: str, m: str, folder: str
+    y: int, m: int, folder: int
 ) -> str:
     return [f"{DATADIR}/{folder}/{y}{str(m).zfill(2)}.nc"]
 
@@ -173,7 +174,7 @@ def clusterplot(
     nlevels: int,
     cbar_extent: float,
     cbar_ylabel: str = None,
-    clabels: bool = False,
+    clabels: Union[bool, list] = False,
     draw_labels: bool = False,
     cmap: str = "seismic",
 ) -> tuple[Figure, NDArray[Any, Object], Colorbar]:
@@ -242,15 +243,17 @@ def clusterplot(
         axes[i].set_boundary(boundary, transform=ccrs.PlateCarree())
         axes[i].add_feature(COASTLINE)
         axes[i].add_feature(BORDERS)
-        if clabels:
+        if isinstance(clabels, bool) and clabels:
             axes[i].clabel(cs)
+        elif isinstance(clabels, list):
+            axes[i].clabel(cs, levels=clabels)
         if draw_labels:
             gl = axes[i].gridlines(
                 dms=False, x_inline=False, y_inline=False, draw_labels=True
             )
             gl.xlocator = mticker.FixedLocator([-90, -60, -30, 0, 30, 60])
-            gl.ylocator = mticker.FixedLocator([40, 50, 60, 70])
-            gl.xlines = False
+            gl.ylocator = mticker.FixedLocator([20, 30, 40, 50, 60, 70])
+            gl.xlines = False,
             gl.ylines = False
             plt.draw()
             for ea in gl.label_artists:
@@ -442,18 +445,35 @@ def create_grid_directory(
     return path
 
 
-def do_kmeans(
-    n_clu: int, path: str, smallname: str, season = "JJA", detrended = False, weigh: str = "sqrtcos"
+def CIequal(str1: str, str2: str) -> bool:
+    return str1.casefold() == str2.casefold()
+
+
+def cluster(
+    n_clu: int, path: str, smallname: str, season = None, kind: str = 'kmeans', detrended = False, weigh: str = "sqrtcos"
 ) -> str:
     midname = "detrended" if detrended else "anomaly"
     da = xr.open_dataarray(f"{path}/{smallname}_{midname}.nc")
-    if weigh=="sqrtcos":
+    if isinstance(season, list):
+        da = da.isel(time=np.isin(da.time.dt.month, season))
+    elif isinstance(season, str):
+        da = da.isel(time=da.time.dt.season == season)
+    elif season is not None:
+        raise RuntimeError(f"Wrong season specifier : {season}, expected str or list")
+    if CIequal(weigh, "sqrtcos"):
         da *= np.sqrt(degcos(da.lat))
-    elif weigh=="cos":
+    elif CIequal(weigh, "cos"):
         da *= degcos(da.lat)
     tbt = da.values.reshape(len(da.time), -1)
-    results = KMeans(n_clu, n_init="auto").fit(tbt)
-    pklpath = f"{path}/k{n_clu}_{midname}_{season}_{weigh}.pkl"
+    if CIequal(kind, "kmeans"):
+        results = KMeans(n_clu, n_init="auto").fit(tbt)
+        suffix = ""
+    elif CIequal(kind, "kmedoids"):
+        results = KMedoids(n_clu).fit(tbt)
+        suffix = "med"
+    else:
+        raise NotImplementedError(f"{kind} clustering not implemented. Options are kmeans and kmedoids")
+    pklpath = f"{path}/k{suffix}{n_clu}_{midname}_{season}_{weigh}.pkl"
     with open(pklpath, "wb") as handle:
         pkl.dump(results, handle)
     return pklpath
