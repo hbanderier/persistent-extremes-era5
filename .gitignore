@@ -2,3 +2,6 @@
 __pycache__
 .vscode
 cdo_commands.log
+Figures
+*.npy
+*.json

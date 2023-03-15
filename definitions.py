@@ -1,6 +1,7 @@
 import os
 import glob
 import platform
+import contourpy
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -23,6 +24,7 @@ from typing import Union, Any
 from nptyping import NDArray, Object, Shape
 from sklearn.cluster import KMeans
 from kmedoids import KMedoids
+from joblib import delayed, Parallel
 
 
 pf = platform.platform()
@@ -109,10 +111,10 @@ def degsin(x: float) -> float:
 DATERANGEPL = pd.date_range("19590101", "20211231")
 YEARSPL = np.unique(DATERANGEPL.year)
 DATERANGEML = pd.date_range("19770101", "20211231")
-WINDBINS = np.arange(0, 25, 2)
-LATBINS = np.arange(15, 75, 2.5)
-LONBINS = np.arange(-90, 30, 3)
-DEPBINS = np.arange(-25, 26, 1.5)
+WINDBINS = np.arange(0, 25, .5)
+LATBINS = np.arange(15, 75.1, .5)
+LONBINS = np.arange(-90, 30, 1)
+DEPBINS = np.arange(-25, 25.1, .5)
 
 COLORS5 = [  # https://coolors.co/palette/ef476f-ffd166-06d6a0-118ab2-073b4c
     "#ef476f",  # pinky red
@@ -165,6 +167,44 @@ SMALLNAME = {
     "Geopotential": "z",
     "Wind": "s",  # Wind speed
 }
+    
+    
+def make_boundary_path(
+    minlon: float, maxlon: float, minlat: float, maxlat: float, n: int = 50
+) -> mpath.Path:
+    """Creates path to be used by GeoAxes.
+
+    Args:
+        minlon (float): minimum longitude
+        maxlon (float): maximum longitude
+        minlat (float): minimum latitude
+        maxlat (float): maximum latitude
+        n (int, optional): Interpolation points for each segment. Defaults to 50.
+
+    Returns:
+        boundary_path (mpath.Path): Boundary Path in flat projection
+    """
+
+    boundary_path = []
+    # North (E->W)
+    edge = [np.linspace(minlon, maxlon, n), np.full(n, maxlat)]
+    boundary_path += [[i, j] for i, j in zip(*edge)]
+
+    # West (N->S)
+    edge = [np.full(n, maxlon), np.linspace(maxlat, minlat, n)]
+    boundary_path += [[i, j] for i, j in zip(*edge)]
+
+    # South (W->E)
+    edge = [np.linspace(maxlon, minlon, n), np.full(n, minlat)]
+    boundary_path += [[i, j] for i, j in zip(*edge)]
+
+    # East (S->N)
+    edge = [np.full(n, minlon), np.linspace(minlat, maxlat, n)]
+    boundary_path += [[i, j] for i, j in zip(*edge)]
+
+    boundary_path = mpath.Path(boundary_path)
+
+    return boundary_path
 
 
 def clusterplot(
@@ -288,7 +328,7 @@ def cdf(timeseries: Union[xr.DataArray, NDArray]) -> tuple[NDArray, NDArray]:
         timeseries = timeseries.values
     idxs = np.argsort(timeseries)
     y = np.cumsum(idxs) / np.sum(idxs)
-    x = timeseries.values[idxs]
+    x = timeseries[idxs]
     return x, y
 
 
@@ -360,7 +400,7 @@ def kde(
 def compute_anomaly(
     ds: xr.DataArray,
     return_clim: bool = False,
-    smooth_kmax: bool = None,
+    smooth_kmax: int = None,
 ) -> Union[
     xr.DataArray, tuple[xr.DataArray, xr.DataArray]
 ]:  # https://github.com/pydata/xarray/issues/3575
@@ -412,7 +452,7 @@ def detrend(
     ds = xr.open_dataset(f"{path}/{name}").rename({"longitude": "lon", "latitude": "lat"})
     if smallname is None:
         smallname = SMALLNAME[variable]
-    if variable == "Geopotential":
+    if variable == "Geopotential" and dataset == "ERA5":
         ds["z"] /= co.g
     da = ds[smallname].chunk({"time": -1, "lon": 41})
     anomaly = xr.map_blocks(compute_anomaly, da, template=da)
@@ -434,15 +474,28 @@ def create_grid_directory(
     if os.path.isdir(path):
         return path
     os.mkdir(path)
-    for basefile in ["detrended.nc", "anomaly.nc"]:
-        filelist = glob.glob(f"{basepath}/dailymean/*_{basefile}")
+    for basefile in ["detrended.nc", "anomaly.nc", "smooth.nc", "z.nc"]:
+        filelist = glob.glob(f"{basepath}/dailymean/*{basefile}")
         for ifile in filelist:
             ofile = f"{path}/{ifile.split('/')[-1]}"
             # print(ifile, ofile)
             cdo.sellonlatbox(
-                minlon, maxlon, minlat, maxlat, input=ifile, output=ofile
+                minlon, maxlon, minlat, maxlat, input=ifile, 
+                output=ofile
             )
     return path
+
+
+def figtitle(
+    minlon: str, maxlon: str, minlat: str, maxlat: str, season: str,
+) -> str:
+    minlon, maxlon, minlat, maxlat = float(minlon), float(maxlon), float(minlat),float(maxlat)
+    title = f'${np.abs(minlon):.1f}°$ {"W" if minlon < 0 else "E"} - '
+    title += f'${np.abs(maxlon):.1f}°$ {"W" if maxlon < 0 else "E"}, '
+    title += f'${np.abs(minlat):.1f}°$ {"S" if minlat < 0 else "N"} - '
+    title += f'${np.abs(maxlat):.1f}°$ {"S" if maxlat < 0 else "N"} '
+    title += season
+    return title
 
 
 def CIequal(str1: str, str2: str) -> bool:
@@ -644,7 +697,7 @@ def compute_Lonew(
         - 1
     )
     Lonw = xr.DataArray(lon[iLonw], coords={"time": da.time}, name="Lonw")
-    Lone = xr.DataArray(lon[iLone], coords={"day": da.day}, name="Lone")
+    Lone = xr.DataArray(lon[iLone], coords={"time": da.time}, name="Lone")
     Lonw.attrs["units"] = "degree_east"
     Lone.attrs["units"] = "degree_east"
     return Lonw, Lone
@@ -670,39 +723,72 @@ def compute_Dep(da: xr.DataArray, trackedLats: xr.DataArray) -> xr.DataArray:
     return Dep
 
 
-def make_boundary_path(
-    minlon: float, maxlon: float, minlat: float, maxlat: float, n: int = 50
-) -> mpath.Path:
-    """Creates path to be used by GeoAxes.
+def meandering(lines):
+    m = 0
+    for line in lines:
+        m += np.sum(np.sqrt(np.sum(np.diff(line, axis=0)**2, axis=1))) / 360
+    return m
 
-    Args:
-        minlon (float): minimum longitude
-        maxlon (float): maximum longitude
-        minlat (float): minimum latitude
-        maxlat (float): maximum latitude
-        n (int, optional): Interpolation points for each segment. Defaults to 50.
+def one_ts(lon, lat, da):
+    m = []
+    gen = contourpy.contour_generator(x=lon, y=lat, z=da)
+    for lev in range(4900, 6205, 5):
+        m.append(meandering(gen.lines(lev)))
+    return np.amax(m)
 
-    Returns:
-        boundary_path (mpath.Path): Boundary Path in flat projection
-    """
 
-    boundary_path = []
-    # North (E->W)
-    edge = [np.linspace(minlon, maxlon, n), np.full(n, maxlat)]
-    boundary_path += [[i, j] for i, j in zip(*edge)]
+def compute_Mea(da: xr.DataArray, njobs: int = 32) -> xr.DataArray:
+    lon = da.lon.values
+    lat = da.lat.values
+    M = Parallel(
+        n_jobs=32, backend="loky", max_nbytes=1e5
+    )(
+        delayed(one_ts)(
+            lon, lat, da.sel(time=t).values
+        ) for t in da.time[:]
+    )
+    return xr.DataArray(M, coords={"time":da.time})
 
-    # West (N->S)
-    edge = [np.full(n, maxlon), np.linspace(maxlat, minlat, n)]
-    boundary_path += [[i, j] for i, j in zip(*edge)]
 
-    # South (W->E)
-    edge = [np.linspace(maxlon, minlon, n), np.full(n, minlat)]
-    boundary_path += [[i, j] for i, j in zip(*edge)]
+def compute_Zoo(basepath: str, box: str, detrend = False):
+    daZ = xr.open_dataset(
+        f"{basepath}/Geopotential/500/{box}/z.nc"
+    )["z"].squeeze()
+    da = xr.open_dataset(
+        f"{basepath}/Wind/Low/{box}/u_smooth.nc"
+    )["u"]
+    da_Lat = xr.open_dataset(
+        f"{basepath}/Wind/Low/dailymean/u.nc"
+    )["u"].sel(lon=da.lon, lat=da.lat).mean(dim='lon')
+    Lat, Int = compute_JLI(da_Lat)
+    Shar, Lats, Latn = compute_shar(da_Lat, Int, Lat)
+    trackedLats, Tilt = compute_Tilt(da, Lat)
+    Intlambda, Lon = compute_Lon(da, trackedLats)
+    Lonw, Lone = compute_Lonew(da, Intlambda, Lon)
+    Dep = compute_Dep(da, trackedLats)
+    Mea = compute_Mea(daZ)
+    Zoo = xr.Dataset({
+        "Lat": Lat, 
+        "Int": Int, 
+        "Shar": Shar, 
+        "Lats": Lats, 
+        "Latn": Latn, 
+        "Tilt": Tilt, 
+        "Lon": Lon, 
+        "Lonw": Lonw, 
+        "Lone": Lone, 
+        "Dep": Dep,
+        "Mea": Mea,
+    }).dropna(dim='time') # dropna if time does not match between z and u (happens for NCEP)
+    if not detrend:
+        Zoo.to_netcdf(f"{basepath}/Wind/Low/{box}/Zoo.nc")
+        return
+    for key, value in Zoo.data_vars.items():
+        Zoo[f"{key}_anomaly"], Zoo[f"{key}_climatology"] = compute_anomaly(
+            value, return_clim=True, smooth_kmax=3
+        )
+        Zoo[f"{key}_detrended"] = xrft.detrend(
+            Zoo[f"{key}_anomaly"], dim="time", detrend_type="linear"
+        )
+    Zoo.to_netcdf(f"{basepath}/Wind/Low/{box}/Zoo.nc")
 
-    # East (S->N)
-    edge = [np.full(n, minlon), np.linspace(minlat, maxlat, n)]
-    boundary_path += [[i, j] for i, j in zip(*edge)]
-
-    boundary_path = mpath.Path(boundary_path)
-
-    return boundary_path
