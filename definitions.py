@@ -21,10 +21,11 @@ import cartopy.crs as ccrs
 import cartopy.feature as feat
 from scipy.stats import gaussian_kde, norm as normal_dist
 from typing import Union, Any
-from nptyping import NDArray, Object, Shape
+from nptyping import NDArray, Object, Shape, Int, Float
 from sklearn.cluster import KMeans
 from kmedoids import KMedoids
 from joblib import delayed, Parallel
+from sklearn.metrics.pairwise import euclidean_distances
 
 
 pf = platform.platform()
@@ -792,3 +793,119 @@ def compute_Zoo(basepath: str, box: str, detrend = False):
         )
     Zoo.to_netcdf(f"{basepath}/Wind/Low/{box}/Zoo.nc")
 
+
+## SOMperf stuff
+
+
+def hexagonal_grid_distance(i: Union[NDArray[Shape['*'], Int], int, list], j: Union[NDArray[Shape['*'], Int], int, list], nx: int) -> Union[NDArray[Any, Int], int]:
+    ndim = 0
+    for input in [i, j]:
+        if isinstance(input, NDArray):
+            ndim += input.ndim
+        elif isinstance(input, list):
+            ndim += 1
+    i, j = np.atleast_1d(i), np.atleast_1d(j)
+    yi, xi = i % nx, i // nx # confusing because of simpsom
+    yj, xj = j % nx, j // nx
+    dx = (xj - yj // 2)[None, :] - (xi - yi // 2)[:, None]
+    dy = yj[None, :] - yi[:, None]
+    mask = np.sign(dx) == np.sign(dy)
+    all_dists = np.where(mask, np.abs(dx + dy), np.amax([np.abs(dx), np.abs(dy)], axis=0))
+    if ndim == 0:
+        return all_dists[0, 0]
+    elif ndim == 1:
+        return all_dists.flatten()
+    return all_dists
+
+
+def kruskal_shepard_error_vectorized(
+        prec_dist: NDArray[Shape['*', '*'], Int], 
+        x: NDArray[Shape['*', '*'], Float], 
+        som: NDArray[Shape['*', '*'], Float]=None, 
+        d: NDArray[Shape['*', '*'], Float]=None
+    ) -> float:
+    """Kruskal-Shepard error.
+    Measures distance preservation between input space and output space. Euclidean distance is used in input space.
+    In output space, distance is usually Manhattan distance between the best matching units on the maps (this distance
+    is provided by the dist_fun argument).
+    Parameters
+    ----------
+    dist_fun : function (k : int, l : int) => int
+        distance function between units k and l on the map.
+    x : array, shape = [n_samples, dim]
+        input samples.
+    som : array, shape = [n_units, dim]
+        (optional) SOM code vectors.
+    d : array, shape = [n_samples, n_units]
+        (optional) euclidean distances between input samples and code vectors.
+    Returns
+    -------
+    kse : float
+        Kruskal-Shepard error (lower is better)
+    References
+    ----------
+    Kruskal, J.B. (1964). Multidimensional scaling by optimizing goodness of fit to a nonmetric hypothesis.
+    Elend, L., & Kramer, O. (2019). Self-Organizing Maps with Convolutional Layers.
+    """
+    n = x.shape[0]
+    if d is None:
+        if som is None:
+            raise ValueError('If distance matrix d is not given, som cannot be None!')
+        else:
+            d = euclidean_distances(x, som)
+    d_data = euclidean_distances(x)
+    d_data /= d_data.max()
+    bmus = np.argmin(d, axis=1)
+    d_som = prec_dist[bmus[:, None], bmus[None, :]].astype(np.float64)
+    d_som /= d_som.max()
+    return np.sum(np.square(d_data - d_som)) / (n**2 - n)
+
+
+def neighborhood_preservation_trustworthiness_vectorized(k: int, som: NDArray, x: NDArray, d: NDArray = None) -> tuple[float, float]:
+    """Neighborhood preservation and trustworthiness of SOM map.
+    Parameters
+    ----------
+    k : int
+        number of neighbors. Must be < n // 2 where n is the data size.
+    som : array, shape = [n_units, dim]
+        SOM code vectors.
+    x : array, shape = [n_samples, dim]
+        input samples.
+    d : array, shape = [n_samples, n_units]
+        (optional) euclidean distances between input samples and code vectors.
+    Returns
+    -------
+    npr, tr : float tuple in [0, 1]
+        neighborhood preservation and trustworthiness measures (higher is better)
+    References
+    ----------
+    Venna, J., & Kaski, S. (2001). Neighborhood preservation in nonlinear projection methods: An experimental study.
+    """
+    n = x.shape[0]  # data size
+    assert k < (n / 2), 'Number of neighbors k must be < N/2 (where N is the number of data samples).'
+    if d is None:
+        d = euclidean_distances(x, som)
+        
+    d_data = euclidean_distances(x) + np.diag(np.inf * np.ones(n))
+    projections = som[np.argmin(d, axis=1)]
+    d_projections = euclidean_distances(projections) + np.diag(np.inf * np.ones(n))
+    original_ranks = pd.DataFrame(d_data).rank(method='min', axis=1)
+    projected_ranks = pd.DataFrame(d_projections).rank(method='min', axis=1)
+    weights = (projected_ranks <= k).sum(axis=1) / (original_ranks <= k).sum(axis=1)  # weight k-NN ties
+    
+    mask0 = np.eye(n, dtype=bool)
+    mask1 = (original_ranks.values <= k) & (projected_ranks.values > k)
+    mask2 = (original_ranks.values > k) & (projected_ranks.values <= k)
+
+    arr0 = (projected_ranks.values - k) * weights.values[:, None]
+    arr0[mask0 | ~ mask1] = 0 
+
+    arr1 = (original_ranks.values - k) / weights.values[:, None]
+    arr1[mask0 | ~ mask2] = 0 
+    
+    trs = np.sum(arr1, axis=1)
+    nps = np.sum(arr0, axis=1)
+
+    npr = 1.0 - 2.0 / (n * k * (2*n - 3*k - 1)) * np.sum(nps)
+    tr = 1.0 - 2.0 / (n * k * (2*n - 3*k - 1)) * np.sum(trs)
+    return npr, tr
