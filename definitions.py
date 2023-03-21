@@ -54,7 +54,7 @@ def filenamessfc(
     y: int, m: int, d: int
 ) -> str:  # Naming conventions of the files on climstor (why are they so different?)
     return [
-        f"{CLIMSTOR}/SFC/data/an_sfc_ERA5_{str(y)}-{str(m).zfill(2)}-{str(d).zfill(2)}.nc"
+        f"{CLIMSTOR}/SFC/data/{str(y)}/an_sfc_ERA5_{str(y)}-{str(m).zfill(2)}-{str(d).zfill(2)}.nc"
     ]
 
 
@@ -154,12 +154,12 @@ ZOO = [
 ]
 
 COASTLINE = feat.NaturalEarthFeature(
-    "physical", "coastline", "10m", edgecolor="black", facecolor="none"
+    "physical", "coastline", "110m", edgecolor="black", facecolor="none"
 )
 BORDERS = feat.NaturalEarthFeature(
     "cultural",
     "admin_0_boundary_lines_land",
-    "10m",
+    "110m",
     edgecolor="grey",
     facecolor="none",
 )
@@ -518,12 +518,12 @@ def cluster(
         da *= np.sqrt(degcos(da.lat))
     elif CIequal(weigh, "cos"):
         da *= degcos(da.lat)
-    tbt = da.values.reshape(len(da.time), -1)
+    X = da.values.reshape(len(da.time), -1)
     if CIequal(kind, "kmeans"):
-        results = KMeans(n_clu, n_init="auto").fit(tbt)
+        results = KMeans(n_clu, n_init="auto").fit(X)
         suffix = ""
     elif CIequal(kind, "kmedoids"):
-        results = KMedoids(n_clu).fit(tbt)
+        results = KMedoids(n_clu).fit(X)
         suffix = "med"
     else:
         raise NotImplementedError(f"{kind} clustering not implemented. Options are kmeans and kmedoids")
@@ -797,7 +797,11 @@ def compute_Zoo(basepath: str, box: str, detrend = False):
 ## SOMperf stuff
 
 
-def hexagonal_grid_distance(i: Union[NDArray[Shape['*'], Int], int, list], j: Union[NDArray[Shape['*'], Int], int, list], nx: int) -> Union[NDArray[Any, Int], int]:
+def hexagonal_grid_distance(
+    i: Union[NDArray[Shape['*'], Int], int, list], 
+    j: Union[NDArray[Shape['*'], Int], int, list], 
+    nx: int, ny: int, PBC: bool = False
+) -> Union[NDArray[Any, Int], int]:
     ndim = 0
     for input in [i, j]:
         if isinstance(input, NDArray):
@@ -805,10 +809,18 @@ def hexagonal_grid_distance(i: Union[NDArray[Shape['*'], Int], int, list], j: Un
         elif isinstance(input, list):
             ndim += 1
     i, j = np.atleast_1d(i), np.atleast_1d(j)
-    yi, xi = i % nx, i // nx # confusing because of simpsom
-    yj, xj = j % nx, j // nx
-    dx = (xj - yj // 2)[None, :] - (xi - yi // 2)[:, None]
+    xi, yi = i % nx, i // nx
+    xj, yj = j % nx, j // nx
     dy = yj[None, :] - yi[:, None]
+    dx = xj[None, :] - xi[:, None]
+    corr = xj[None, :]// 2 - xi[:, None] // 2
+    if PBC:
+        maskx = np.abs(dx) > (nx / 2)
+        masky = np.abs(dy) > (ny / 2)
+        dx[maskx] = - np.sign(dx[maskx]) * (nx - np.abs(dx[maskx]))
+        dy[masky] = - np.sign(dy[masky]) * (ny - np.abs(dy[masky]))
+        corr[maskx] = - np.sign(corr[maskx]) * (nx // 2 - np.abs(corr[maskx]))
+    dy = dy - corr
     mask = np.sign(dx) == np.sign(dy)
     all_dists = np.where(mask, np.abs(dx + dy), np.amax([np.abs(dx), np.abs(dy)], axis=0))
     if ndim == 0:
@@ -819,10 +831,10 @@ def hexagonal_grid_distance(i: Union[NDArray[Shape['*'], Int], int, list], j: Un
 
 
 def kruskal_shepard_error_vectorized(
-        prec_dist: NDArray[Shape['*', '*'], Int], 
-        x: NDArray[Shape['*', '*'], Float], 
-        som: NDArray[Shape['*', '*'], Float]=None, 
-        d: NDArray[Shape['*', '*'], Float]=None
+        prec_dist: NDArray[Shape['*, *'], Int], 
+        x: NDArray[Shape['*, *'], Float], 
+        som: NDArray[Shape['*, *'], Float]=None, 
+        d: NDArray[Shape['*, *'], Float]=None
     ) -> float:
     """Kruskal-Shepard error.
     Measures distance preservation between input space and output space. Euclidean distance is used in input space.
