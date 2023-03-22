@@ -20,7 +20,7 @@ from matplotlib.container import BarContainer
 import cartopy.crs as ccrs
 import cartopy.feature as feat
 from scipy.stats import gaussian_kde, norm as normal_dist
-from typing import Union, Any
+from typing import Union, Any, Tuple
 from nptyping import NDArray, Object, Shape, Int, Float
 from sklearn.cluster import KMeans
 from kmedoids import KMedoids
@@ -30,14 +30,14 @@ from sklearn.metrics.pairwise import euclidean_distances
 
 pf = platform.platform()
 if pf.find("cray") >= 0:
-    NODE = "daint"
+    NODE = "DAINT"
+    DATADIR = "/scratch/snx3000/hbanderi/data/persistent"
 elif platform.node()[:4] == "clim":
     NODE = "CLIM"
-else:  # find better later
+    DATADIR = "/scratch/hugo"
+elif pf.find("el7") >= 0:  # find better later
     NODE = "UBELIX"
-DATADIR = (
-    "/scratch/snx3000/hbanderi/data/persistent" if NODE == "daint" else "/scratch2/hugo"
-)
+    DATADIR = "/storage/scratch/users/hb22g102"
 CLIMSTOR = "/mnt/climstor/ecmwf/era5-new/raw"
 
 
@@ -58,17 +58,13 @@ def filenamessfc(
     ]
 
 
-def filenamespl(
-    y: int, m: int, d: int
-) -> str:
+def filenamespl(y: int, m: int, d: int) -> str:
     return [
         f"{CLIMSTOR}/PL/data/an_pl_ERA5_{str(y)}-{str(m).zfill(2)}-{str(d).zfill(2)}.nc"
     ]  # returns iterable to have same call signature as filenamescl(y, m, d)
 
 
-def filenamegeneric(
-    y: int, m: int, folder: int
-) -> str:
+def filenamegeneric(y: int, m: int, folder: int) -> str:
     return [f"{DATADIR}/{folder}/{y}{str(m).zfill(2)}.nc"]
 
 
@@ -83,7 +79,8 @@ def _fn(date: pd.Timestamp, which: str) -> str:
         return filenamegeneric(date.year, date.month, which)
 
 
-def fn(date: Union[list, NDArray, pd.DatetimeIndex, pd.Timestamp], which):  # instead takes pandas.timestamp (or iterable of _) as input
+# instead takes pandas.timestamp (or iterable of _) as input
+def fn(date: Union[list, NDArray, pd.DatetimeIndex, pd.Timestamp], which):
     if isinstance(date, (list, NDArray, pd.DatetimeIndex)):
         filenames = []
         for d in date:
@@ -112,10 +109,10 @@ def degsin(x: float) -> float:
 DATERANGEPL = pd.date_range("19590101", "20211231")
 YEARSPL = np.unique(DATERANGEPL.year)
 DATERANGEML = pd.date_range("19770101", "20211231")
-WINDBINS = np.arange(0, 25, .5)
-LATBINS = np.arange(15, 75.1, .5)
+WINDBINS = np.arange(0, 25, 0.5)
+LATBINS = np.arange(15, 75.1, 0.5)
 LONBINS = np.arange(-90, 30, 1)
-DEPBINS = np.arange(-25, 25.1, .5)
+DEPBINS = np.arange(-25, 25.1, 0.5)
 
 COLORS5 = [  # https://coolors.co/palette/ef476f-ffd166-06d6a0-118ab2-073b4c
     "#ef476f",  # pinky red
@@ -168,8 +165,8 @@ SMALLNAME = {
     "Geopotential": "z",
     "Wind": "s",  # Wind speed
 }
-    
-    
+
+
 def make_boundary_path(
     minlon: float, maxlon: float, minlat: float, maxlat: float, n: int = 50
 ) -> mpath.Path:
@@ -218,7 +215,7 @@ def clusterplot(
     clabels: Union[bool, list] = False,
     draw_labels: bool = False,
     cmap: str = "seismic",
-) -> tuple[Figure, NDArray[Any, Object], Colorbar]:
+) -> Tuple[Figure, NDArray[Any, Object], Colorbar]:
     """Creates nice layout of plots with a common colorbar and color normalization
 
     Args:
@@ -294,12 +291,12 @@ def clusterplot(
             )
             gl.xlocator = mticker.FixedLocator([-90, -60, -30, 0, 30, 60])
             gl.ylocator = mticker.FixedLocator([20, 30, 40, 50, 60, 70])
-            gl.xlines = False,
+            gl.xlines = (False,)
             gl.ylines = False
             plt.draw()
             for ea in gl.label_artists:
                 current_pos = ea.get_position()
-                if ea.get_text()[-1] in ['N', 'S']:
+                if ea.get_text()[-1] in ["N", "S"]:
                     ea.set_visible(True)
                     continue
                 if current_pos[1] > 4000000:
@@ -315,7 +312,7 @@ def clusterplot(
     return fig, axes, cbar
 
 
-def cdf(timeseries: Union[xr.DataArray, NDArray]) -> tuple[NDArray, NDArray]:
+def cdf(timeseries: Union[xr.DataArray, NDArray]) -> Tuple[NDArray, NDArray]:
     """Computes the cumulative distribution function of a 1D DataArray
 
     Args:
@@ -333,10 +330,10 @@ def cdf(timeseries: Union[xr.DataArray, NDArray]) -> tuple[NDArray, NDArray]:
     return x, y
 
 
-### Create histogram
+# Create histogram
 def compute_hist(
     timeseries: xr.DataArray, season: str = None, bins: Union[NDArray, list] = LATBINS
-) -> tuple[NDArray, NDArray]:
+) -> Tuple[NDArray, NDArray]:
     """small wrapper for np.histogram that extracts a season out of xr.DataArray
 
     Args:
@@ -384,7 +381,7 @@ def kde(
     scaled: bool = False,
     return_x: bool = False,
     **kwargs,
-) -> Union[NDArray, tuple[NDArray, NDArray]]:
+) -> Union[NDArray, Tuple[NDArray, NDArray]]:
     hist = compute_hist(timeseries, season, bins)
     midpoints = (hist[1][1:] + hist[1][:-1]) / 2
     norm = (hist[1][1] - hist[1][0]) * np.sum(hist[0])
@@ -403,7 +400,7 @@ def compute_anomaly(
     return_clim: bool = False,
     smooth_kmax: int = None,
 ) -> Union[
-    xr.DataArray, tuple[xr.DataArray, xr.DataArray]
+    xr.DataArray, Tuple[xr.DataArray, xr.DataArray]
 ]:  # https://github.com/pydata/xarray/issues/3575
     """computes daily anomalies extracted using a (possibly smoothed) climatology
 
@@ -434,7 +431,12 @@ def compute_anomaly(
 
 
 def detrend(
-    dataset: str, variable: str, level: str, region: str, smallname: str = None, name: str = "full.nc"
+    dataset: str,
+    variable: str,
+    level: str,
+    region: str,
+    smallname: str = None,
+    name: str = "full.nc",
 ) -> str:
     """creates a detrended dataset out of the specs
 
@@ -450,7 +452,9 @@ def detrend(
         str: path of the detrended file for ease of access
     """
     path = f"{DATADIR}/{dataset}/{variable}/{level}/{region}"
-    ds = xr.open_dataset(f"{path}/{name}").rename({"longitude": "lon", "latitude": "lat"})
+    ds = xr.open_dataset(f"{path}/{name}").rename(
+        {"longitude": "lon", "latitude": "lat"}
+    )
     if smallname is None:
         smallname = SMALLNAME[variable]
     if variable == "Geopotential" and dataset == "ERA5":
@@ -466,8 +470,14 @@ def detrend(
 
 
 def create_grid_directory(
-    cdo, dataset: str, variable: str, level: str,
-    minlon: float, maxlon: float, minlat: float, maxlat: float
+    cdo,
+    dataset: str,
+    variable: str,
+    level: str,
+    minlon: float,
+    maxlon: float,
+    minlat: float,
+    maxlat: float,
 ) -> str:
     basepath = f"{DATADIR}/{dataset}/{variable}/{level}"
     newdir = f"box_{minlon}_{maxlon}_{minlat}_{maxlat}"
@@ -480,17 +490,23 @@ def create_grid_directory(
         for ifile in filelist:
             ofile = f"{path}/{ifile.split('/')[-1]}"
             # print(ifile, ofile)
-            cdo.sellonlatbox(
-                minlon, maxlon, minlat, maxlat, input=ifile, 
-                output=ofile
-            )
+            cdo.sellonlatbox(minlon, maxlon, minlat, maxlat, input=ifile, output=ofile)
     return path
 
 
 def figtitle(
-    minlon: str, maxlon: str, minlat: str, maxlat: str, season: str,
+    minlon: str,
+    maxlon: str,
+    minlat: str,
+    maxlat: str,
+    season: str,
 ) -> str:
-    minlon, maxlon, minlat, maxlat = float(minlon), float(maxlon), float(minlat),float(maxlat)
+    minlon, maxlon, minlat, maxlat = (
+        float(minlon),
+        float(maxlon),
+        float(minlat),
+        float(maxlat),
+    )
     title = f'${np.abs(minlon):.1f}°$ {"W" if minlon < 0 else "E"} - '
     title += f'${np.abs(maxlon):.1f}°$ {"W" if maxlon < 0 else "E"}, '
     title += f'${np.abs(minlat):.1f}°$ {"S" if minlat < 0 else "N"} - '
@@ -504,7 +520,13 @@ def CIequal(str1: str, str2: str) -> bool:
 
 
 def cluster(
-    n_clu: int, path: str, smallname: str, season = None, kind: str = 'kmeans', detrended = False, weigh: str = "sqrtcos"
+    n_clu: int,
+    path: str,
+    smallname: str,
+    season=None,
+    kind: str = "kmeans",
+    detrended=False,
+    weigh: str = "sqrtcos",
 ) -> str:
     midname = "detrended" if detrended else "anomaly"
     da = xr.open_dataarray(f"{path}/{smallname}_{midname}.nc")
@@ -526,15 +548,17 @@ def cluster(
         results = KMedoids(n_clu).fit(X)
         suffix = "med"
     else:
-        raise NotImplementedError(f"{kind} clustering not implemented. Options are kmeans and kmedoids")
+        raise NotImplementedError(
+            f"{kind} clustering not implemented. Options are kmeans and kmedoids"
+        )
     pklpath = f"{path}/k{suffix}{n_clu}_{midname}_{season}_{weigh}.pkl"
     with open(pklpath, "wb") as handle:
         pkl.dump(results, handle)
     return pklpath
 
 
-### Lat and Int
-def compute_JLI(da_Lat: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
+# Lat and Int
+def compute_JLI(da_Lat: xr.DataArray) -> Tuple[xr.DataArray, xr.DataArray]:
     """Computes the Jet Latitude Index (also called Lat) as well as the wind speed at the JLI (Int)
 
     Args:
@@ -554,10 +578,10 @@ def compute_JLI(da_Lat: xr.DataArray) -> tuple[xr.DataArray, xr.DataArray]:
     return Lat, Int
 
 
-### Shar, Latn, Lats,
+# Shar, Latn, Lats,
 def compute_shar(
     da_Lat: xr.DataArray, Int: xr.DataArray, Lat: xr.DataArray
-) -> tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
+) -> Tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
     """Computes sharpness and south + north latitudinal extent of the jet
 
     Args:
@@ -593,10 +617,10 @@ def compute_shar(
     return Shar, Lats, Latn
 
 
-### Tilt
+# Tilt
 def compute_Tilt(
     da: xr.DataArray, Lat: xr.DataArray
-) -> tuple[xr.DataArray, xr.DataArray]:
+) -> Tuple[xr.DataArray, xr.DataArray]:
     """Computes tilt and also returns the tracked latitudes
 
     Args:
@@ -642,10 +666,10 @@ def compute_Tilt(
     return trackedLats, Tilt
 
 
-### Lon
+# Lon
 def compute_Lon(
     da: xr.DataArray, trackedLats: xr.DataArray
-) -> tuple[xr.DataArray, xr.DataArray]:
+) -> Tuple[xr.DataArray, xr.DataArray]:
     """_summary_
 
     Args:
@@ -666,10 +690,10 @@ def compute_Lon(
     return Intlambda, Lon.rename("Lon")
 
 
-### Lonw, Lone
+# Lonw, Lone
 def compute_Lonew(
     da: xr.DataArray, Intlambda: xr.DataArray, Lon: xr.DataArray
-) -> tuple[xr.DataArray, xr.DataArray]:
+) -> Tuple[xr.DataArray, xr.DataArray]:
     """_summary_
 
     Args:
@@ -704,7 +728,7 @@ def compute_Lonew(
     return Lonw, Lone
 
 
-### Dep
+# Dep
 def compute_Dep(da: xr.DataArray, trackedLats: xr.DataArray) -> xr.DataArray:
     """_summary_
 
@@ -727,8 +751,9 @@ def compute_Dep(da: xr.DataArray, trackedLats: xr.DataArray) -> xr.DataArray:
 def meandering(lines):
     m = 0
     for line in lines:
-        m += np.sum(np.sqrt(np.sum(np.diff(line, axis=0)**2, axis=1))) / 360
+        m += np.sum(np.sqrt(np.sum(np.diff(line, axis=0) ** 2, axis=1))) / 360
     return m
+
 
 def one_ts(lon, lat, da):
     m = []
@@ -741,26 +766,20 @@ def one_ts(lon, lat, da):
 def compute_Mea(da: xr.DataArray, njobs: int = 32) -> xr.DataArray:
     lon = da.lon.values
     lat = da.lat.values
-    M = Parallel(
-        n_jobs=32, backend="loky", max_nbytes=1e5
-    )(
-        delayed(one_ts)(
-            lon, lat, da.sel(time=t).values
-        ) for t in da.time[:]
+    M = Parallel(n_jobs=32, backend="loky", max_nbytes=1e5)(
+        delayed(one_ts)(lon, lat, da.sel(time=t).values) for t in da.time[:]
     )
-    return xr.DataArray(M, coords={"time":da.time})
+    return xr.DataArray(M, coords={"time": da.time})
 
 
-def compute_Zoo(basepath: str, box: str, detrend = False):
-    daZ = xr.open_dataset(
-        f"{basepath}/Geopotential/500/{box}/z.nc"
-    )["z"].squeeze()
-    da = xr.open_dataset(
-        f"{basepath}/Wind/Low/{box}/u_smooth.nc"
-    )["u"]
-    da_Lat = xr.open_dataset(
-        f"{basepath}/Wind/Low/dailymean/u.nc"
-    )["u"].sel(lon=da.lon, lat=da.lat).mean(dim='lon')
+def compute_Zoo(basepath: str, box: str, detrend=False):
+    daZ = xr.open_dataset(f"{basepath}/Geopotential/500/{box}/z.nc")["z"].squeeze()
+    da = xr.open_dataset(f"{basepath}/Wind/Low/{box}/u_smooth.nc")["u"]
+    da_Lat = (
+        xr.open_dataset(f"{basepath}/Wind/Low/dailymean/u.nc")["u"]
+        .sel(lon=da.lon, lat=da.lat)
+        .mean(dim="lon")
+    )
     Lat, Int = compute_JLI(da_Lat)
     Shar, Lats, Latn = compute_shar(da_Lat, Int, Lat)
     trackedLats, Tilt = compute_Tilt(da, Lat)
@@ -768,19 +787,23 @@ def compute_Zoo(basepath: str, box: str, detrend = False):
     Lonw, Lone = compute_Lonew(da, Intlambda, Lon)
     Dep = compute_Dep(da, trackedLats)
     Mea = compute_Mea(daZ)
-    Zoo = xr.Dataset({
-        "Lat": Lat, 
-        "Int": Int, 
-        "Shar": Shar, 
-        "Lats": Lats, 
-        "Latn": Latn, 
-        "Tilt": Tilt, 
-        "Lon": Lon, 
-        "Lonw": Lonw, 
-        "Lone": Lone, 
-        "Dep": Dep,
-        "Mea": Mea,
-    }).dropna(dim='time') # dropna if time does not match between z and u (happens for NCEP)
+    Zoo = xr.Dataset(
+        {
+            "Lat": Lat,
+            "Int": Int,
+            "Shar": Shar,
+            "Lats": Lats,
+            "Latn": Latn,
+            "Tilt": Tilt,
+            "Lon": Lon,
+            "Lonw": Lonw,
+            "Lone": Lone,
+            "Dep": Dep,
+            "Mea": Mea,
+        }
+    ).dropna(
+        dim="time"
+    )  # dropna if time does not match between z and u (happens for NCEP)
     if not detrend:
         Zoo.to_netcdf(f"{basepath}/Wind/Low/{box}/Zoo.nc")
         return
@@ -794,13 +817,15 @@ def compute_Zoo(basepath: str, box: str, detrend = False):
     Zoo.to_netcdf(f"{basepath}/Wind/Low/{box}/Zoo.nc")
 
 
-## SOMperf stuff
+# SOMperf stuff
 
 
 def hexagonal_grid_distance(
-    i: Union[NDArray[Shape['*'], Int], int, list], 
-    j: Union[NDArray[Shape['*'], Int], int, list], 
-    nx: int, ny: int, PBC: bool = False
+    i: Union[NDArray[Shape["*"], Int], int, list],
+    j: Union[NDArray[Shape["*"], Int], int, list],
+    nx: int,
+    ny: int,
+    PBC: bool = False,
 ) -> Union[NDArray[Any, Int], int]:
     ndim = 0
     for input in [i, j]:
@@ -813,16 +838,18 @@ def hexagonal_grid_distance(
     xj, yj = j % nx, j // nx
     dy = yj[None, :] - yi[:, None]
     dx = xj[None, :] - xi[:, None]
-    corr = xj[None, :]// 2 - xi[:, None] // 2
+    corr = xj[None, :] // 2 - xi[:, None] // 2
     if PBC:
         maskx = np.abs(dx) > (nx / 2)
         masky = np.abs(dy) > (ny / 2)
-        dx[maskx] = - np.sign(dx[maskx]) * (nx - np.abs(dx[maskx]))
-        dy[masky] = - np.sign(dy[masky]) * (ny - np.abs(dy[masky]))
-        corr[maskx] = - np.sign(corr[maskx]) * (nx // 2 - np.abs(corr[maskx]))
+        dx[maskx] = -np.sign(dx[maskx]) * (nx - np.abs(dx[maskx]))
+        dy[masky] = -np.sign(dy[masky]) * (ny - np.abs(dy[masky]))
+        corr[maskx] = -np.sign(corr[maskx]) * (nx // 2 - np.abs(corr[maskx]))
     dy = dy - corr
     mask = np.sign(dx) == np.sign(dy)
-    all_dists = np.where(mask, np.abs(dx + dy), np.amax([np.abs(dx), np.abs(dy)], axis=0))
+    all_dists = np.where(
+        mask, np.abs(dx + dy), np.amax([np.abs(dx), np.abs(dy)], axis=0)
+    )
     if ndim == 0:
         return all_dists[0, 0]
     elif ndim == 1:
@@ -830,12 +857,22 @@ def hexagonal_grid_distance(
     return all_dists
 
 
+def smooth_hex(
+    quantity: NDArray[Shape["*"], Float],
+    precomputed_distances: NDArray[Shape["*, *"], Int],
+    k_nn: int = 1,
+) -> NDArray[Shape["*"], Float]:
+    return np.sum(
+        (quantity[None, :] * (precomputed_distances <= k_nn).astype(int)), axis=1
+    ) / np.sum(precomputed_distances[0, :] <= k_nn)
+
+
 def kruskal_shepard_error_vectorized(
-        prec_dist: NDArray[Shape['*, *'], Int], 
-        x: NDArray[Shape['*, *'], Float], 
-        som: NDArray[Shape['*, *'], Float]=None, 
-        d: NDArray[Shape['*, *'], Float]=None
-    ) -> float:
+    precomputed_distances: NDArray[Shape["*, *"], Int],
+    x: NDArray[Shape["*, *"], Float],
+    som: NDArray[Shape["*, *"], Float] = None,
+    d: NDArray[Shape["*, *"], Float] = None,
+) -> float:
     """Kruskal-Shepard error.
     Measures distance preservation between input space and output space. Euclidean distance is used in input space.
     In output space, distance is usually Manhattan distance between the best matching units on the maps (this distance
@@ -862,18 +899,20 @@ def kruskal_shepard_error_vectorized(
     n = x.shape[0]
     if d is None:
         if som is None:
-            raise ValueError('If distance matrix d is not given, som cannot be None!')
+            raise ValueError("If distance matrix d is not given, som cannot be None!")
         else:
             d = euclidean_distances(x, som)
     d_data = euclidean_distances(x)
     d_data /= d_data.max()
     bmus = np.argmin(d, axis=1)
-    d_som = prec_dist[bmus[:, None], bmus[None, :]].astype(np.float64)
+    d_som = precomputed_distances[bmus[:, None], bmus[None, :]].astype(np.float64)
     d_som /= d_som.max()
     return np.sum(np.square(d_data - d_som)) / (n**2 - n)
 
 
-def neighborhood_preservation_trustworthiness_vectorized(k: int, som: NDArray, x: NDArray, d: NDArray = None) -> tuple[float, float]:
+def neighborhood_preservation_trustworthiness_vectorized(
+    k: int, som: NDArray, x: NDArray, d: NDArray = None
+) -> Tuple[float, float]:
     """Neighborhood preservation and trustworthiness of SOM map.
     Parameters
     ----------
@@ -894,30 +933,34 @@ def neighborhood_preservation_trustworthiness_vectorized(k: int, som: NDArray, x
     Venna, J., & Kaski, S. (2001). Neighborhood preservation in nonlinear projection methods: An experimental study.
     """
     n = x.shape[0]  # data size
-    assert k < (n / 2), 'Number of neighbors k must be < N/2 (where N is the number of data samples).'
+    assert k < (
+        n / 2
+    ), "Number of neighbors k must be < N/2 (where N is the number of data samples)."
     if d is None:
         d = euclidean_distances(x, som)
-        
+
     d_data = euclidean_distances(x) + np.diag(np.inf * np.ones(n))
     projections = som[np.argmin(d, axis=1)]
     d_projections = euclidean_distances(projections) + np.diag(np.inf * np.ones(n))
-    original_ranks = pd.DataFrame(d_data).rank(method='min', axis=1)
-    projected_ranks = pd.DataFrame(d_projections).rank(method='min', axis=1)
-    weights = (projected_ranks <= k).sum(axis=1) / (original_ranks <= k).sum(axis=1)  # weight k-NN ties
-    
+    original_ranks = pd.DataFrame(d_data).rank(method="min", axis=1)
+    projected_ranks = pd.DataFrame(d_projections).rank(method="min", axis=1)
+    weights = (projected_ranks <= k).sum(axis=1) / (original_ranks <= k).sum(
+        axis=1
+    )  # weight k-NN ties
+
     mask0 = np.eye(n, dtype=bool)
     mask1 = (original_ranks.values <= k) & (projected_ranks.values > k)
     mask2 = (original_ranks.values > k) & (projected_ranks.values <= k)
 
     arr0 = (projected_ranks.values - k) * weights.values[:, None]
-    arr0[mask0 | ~ mask1] = 0 
+    arr0[mask0 | ~mask1] = 0
 
     arr1 = (original_ranks.values - k) / weights.values[:, None]
-    arr1[mask0 | ~ mask2] = 0 
-    
+    arr1[mask0 | ~mask2] = 0
+
     trs = np.sum(arr1, axis=1)
     nps = np.sum(arr0, axis=1)
 
-    npr = 1.0 - 2.0 / (n * k * (2*n - 3*k - 1)) * np.sum(nps)
-    tr = 1.0 - 2.0 / (n * k * (2*n - 3*k - 1)) * np.sum(trs)
+    npr = 1.0 - 2.0 / (n * k * (2 * n - 3 * k - 1)) * np.sum(nps)
+    tr = 1.0 - 2.0 / (n * k * (2 * n - 3 * k - 1)) * np.sum(trs)
     return npr, tr
