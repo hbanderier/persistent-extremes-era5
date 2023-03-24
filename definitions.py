@@ -8,6 +8,7 @@ import xarray as xr
 import xrft
 import pickle as pkl
 import scipy.constants as co
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.path as mpath
@@ -255,7 +256,7 @@ def clusterplot(
         nlevels - 1,
     )
     levels = np.delete(levels0, nlevels - 1)
-    cmap = cm.get_cmap(cmap)
+    cmap = mpl.colormaps[cmap]
     norm = BoundaryNorm(levels, cmap.N, extend="both")
     im = cm.ScalarMappable(norm=norm, cmap=cmap)
     axes = axes.flatten()
@@ -446,20 +447,20 @@ def detrend(
         level (str): p level
         region (str): North_Atlantic or full (dailymean)
         smallname (str): variable name in the dataset. Defaults to SMALLNAME[variable] (see definition)
-        name (str, optional): _description_. Defaults to "full.nc".
+        name (str, optional): name. Defaults to "full.nc".
 
     Returns:
         str: path of the detrended file for ease of access
     """
     path = f"{DATADIR}/{dataset}/{variable}/{level}/{region}"
-    ds = xr.open_dataset(f"{path}/{name}").rename(
+    ds = xr.open_dataset(f"{path}/{name}", chunks={"time": -1, "lon": 20, 'lat': 20}).rename(
         {"longitude": "lon", "latitude": "lat"}
     )
     if smallname is None:
         smallname = SMALLNAME[variable]
     if variable == "Geopotential" and dataset == "ERA5":
         ds["z"] /= co.g
-    da = ds[smallname].chunk({"time": -1, "lon": 41})
+    da = ds[smallname]
     anomaly = xr.map_blocks(compute_anomaly, da, template=da)
     detrended = xr.map_blocks(
         xrft.detrend, anomaly, args=("time", "linear"), template=da
@@ -866,101 +867,3 @@ def smooth_hex(
         (quantity[None, :] * (precomputed_distances <= k_nn).astype(int)), axis=1
     ) / np.sum(precomputed_distances[0, :] <= k_nn)
 
-
-def kruskal_shepard_error_vectorized(
-    precomputed_distances: NDArray[Shape["*, *"], Int],
-    x: NDArray[Shape["*, *"], Float],
-    som: NDArray[Shape["*, *"], Float] = None,
-    d: NDArray[Shape["*, *"], Float] = None,
-) -> float:
-    """Kruskal-Shepard error.
-    Measures distance preservation between input space and output space. Euclidean distance is used in input space.
-    In output space, distance is usually Manhattan distance between the best matching units on the maps (this distance
-    is provided by the dist_fun argument).
-    Parameters
-    ----------
-    dist_fun : function (k : int, l : int) => int
-        distance function between units k and l on the map.
-    x : array, shape = [n_samples, dim]
-        input samples.
-    som : array, shape = [n_units, dim]
-        (optional) SOM code vectors.
-    d : array, shape = [n_samples, n_units]
-        (optional) euclidean distances between input samples and code vectors.
-    Returns
-    -------
-    kse : float
-        Kruskal-Shepard error (lower is better)
-    References
-    ----------
-    Kruskal, J.B. (1964). Multidimensional scaling by optimizing goodness of fit to a nonmetric hypothesis.
-    Elend, L., & Kramer, O. (2019). Self-Organizing Maps with Convolutional Layers.
-    """
-    n = x.shape[0]
-    if d is None:
-        if som is None:
-            raise ValueError("If distance matrix d is not given, som cannot be None!")
-        else:
-            d = euclidean_distances(x, som)
-    d_data = euclidean_distances(x)
-    d_data /= d_data.max()
-    bmus = np.argmin(d, axis=1)
-    d_som = precomputed_distances[bmus[:, None], bmus[None, :]].astype(np.float64)
-    d_som /= d_som.max()
-    return np.sum(np.square(d_data - d_som)) / (n**2 - n)
-
-
-def neighborhood_preservation_trustworthiness_vectorized(
-    k: int, som: NDArray, x: NDArray, d: NDArray = None
-) -> Tuple[float, float]:
-    """Neighborhood preservation and trustworthiness of SOM map.
-    Parameters
-    ----------
-    k : int
-        number of neighbors. Must be < n // 2 where n is the data size.
-    som : array, shape = [n_units, dim]
-        SOM code vectors.
-    x : array, shape = [n_samples, dim]
-        input samples.
-    d : array, shape = [n_samples, n_units]
-        (optional) euclidean distances between input samples and code vectors.
-    Returns
-    -------
-    npr, tr : float tuple in [0, 1]
-        neighborhood preservation and trustworthiness measures (higher is better)
-    References
-    ----------
-    Venna, J., & Kaski, S. (2001). Neighborhood preservation in nonlinear projection methods: An experimental study.
-    """
-    n = x.shape[0]  # data size
-    assert k < (
-        n / 2
-    ), "Number of neighbors k must be < N/2 (where N is the number of data samples)."
-    if d is None:
-        d = euclidean_distances(x, som)
-
-    d_data = euclidean_distances(x) + np.diag(np.inf * np.ones(n))
-    projections = som[np.argmin(d, axis=1)]
-    d_projections = euclidean_distances(projections) + np.diag(np.inf * np.ones(n))
-    original_ranks = pd.DataFrame(d_data).rank(method="min", axis=1)
-    projected_ranks = pd.DataFrame(d_projections).rank(method="min", axis=1)
-    weights = (projected_ranks <= k).sum(axis=1) / (original_ranks <= k).sum(
-        axis=1
-    )  # weight k-NN ties
-
-    mask0 = np.eye(n, dtype=bool)
-    mask1 = (original_ranks.values <= k) & (projected_ranks.values > k)
-    mask2 = (original_ranks.values > k) & (projected_ranks.values <= k)
-
-    arr0 = (projected_ranks.values - k) * weights.values[:, None]
-    arr0[mask0 | ~mask1] = 0
-
-    arr1 = (original_ranks.values - k) / weights.values[:, None]
-    arr1[mask0 | ~mask2] = 0
-
-    trs = np.sum(arr1, axis=1)
-    nps = np.sum(arr0, axis=1)
-
-    npr = 1.0 - 2.0 / (n * k * (2 * n - 3 * k - 1)) * np.sum(nps)
-    tr = 1.0 - 2.0 / (n * k * (2 * n - 3 * k - 1)) * np.sum(trs)
-    return npr, tr
