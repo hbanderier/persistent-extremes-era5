@@ -21,12 +21,16 @@ from matplotlib.container import BarContainer
 import cartopy.crs as ccrs
 import cartopy.feature as feat
 from scipy.stats import gaussian_kde, norm as normal_dist
-from typing import Union, Any, Tuple
+from typing import Union, Any, Tuple, Optional
 from nptyping import NDArray, Object, Shape, Int, Float
+from dataclasses import dataclass
+from pathlib import Path
 from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA as pca
 from kmedoids import KMedoids
 from joblib import delayed, Parallel
 from sklearn.metrics.pairwise import euclidean_distances
+from cdo import Cdo
 
 
 pf = platform.platform()
@@ -39,7 +43,9 @@ elif platform.node()[:4] == "clim":
 elif pf.find("el7") >= 0:  # find better later
     NODE = "UBELIX"
     DATADIR = "/storage/scratch/users/hb22g102"
+    os.environ["CDO"] = "/storage/homefs/hb22g102/mambaforge/envs/env11/bin/cdo"
 CLIMSTOR = "/mnt/climstor/ecmwf/era5-new/raw"
+cdo = Cdo()
 
 
 def filenamesml(
@@ -162,10 +168,7 @@ BORDERS = feat.NaturalEarthFeature(
     facecolor="none",
 )
 
-SMALLNAME = {
-    "Geopotential": "z",
-    "Wind": "s",  # Wind speed
-}
+SMALLNAME = {"Geopotential": "z", "Wind": "s", "Temperature": "t"}  # Wind speed
 
 
 def make_boundary_path(
@@ -431,70 +434,6 @@ def compute_anomaly(
     return anom
 
 
-def detrend(
-    dataset: str,
-    variable: str,
-    level: str,
-    region: str,
-    smallname: str = None,
-    name: str = "full.nc",
-) -> str:
-    """creates a detrended dataset out of the specs
-
-    Args:
-        dataset (str): NCEP, ERA40, ERA5,
-        variable (str):
-        level (str): p level
-        region (str): North_Atlantic or full (dailymean)
-        smallname (str): variable name in the dataset. Defaults to SMALLNAME[variable] (see definition)
-        name (str, optional): name. Defaults to "full.nc".
-
-    Returns:
-        str: path of the detrended file for ease of access
-    """
-    path = f"{DATADIR}/{dataset}/{variable}/{level}/{region}"
-    ds = xr.open_dataset(f"{path}/{name}", chunks={"time": -1, "lon": 20, 'lat': 20}).rename(
-        {"longitude": "lon", "latitude": "lat"}
-    )
-    if smallname is None:
-        smallname = SMALLNAME[variable]
-    if variable == "Geopotential" and dataset == "ERA5":
-        ds["z"] /= co.g
-    da = ds[smallname]
-    anomaly = xr.map_blocks(compute_anomaly, da, template=da)
-    detrended = xr.map_blocks(
-        xrft.detrend, anomaly, args=("time", "linear"), template=da
-    )
-    anomaly.to_netcdf(f"{path}/{smallname}_anomaly.nc")
-    detrended.to_netcdf(f"{path}/{smallname}_detrended.nc")
-    return path
-
-
-def create_grid_directory(
-    cdo,
-    dataset: str,
-    variable: str,
-    level: str,
-    minlon: float,
-    maxlon: float,
-    minlat: float,
-    maxlat: float,
-) -> str:
-    basepath = f"{DATADIR}/{dataset}/{variable}/{level}"
-    newdir = f"box_{minlon}_{maxlon}_{minlat}_{maxlat}"
-    path = f"{basepath}/{newdir}"
-    if os.path.isdir(path):
-        return path
-    os.mkdir(path)
-    for basefile in ["detrended.nc", "anomaly.nc", "smooth.nc", "z.nc"]:
-        filelist = glob.glob(f"{basepath}/dailymean/*{basefile}")
-        for ifile in filelist:
-            ofile = f"{path}/{ifile.split('/')[-1]}"
-            # print(ifile, ofile)
-            cdo.sellonlatbox(minlon, maxlon, minlat, maxlat, input=ifile, output=ofile)
-    return path
-
-
 def figtitle(
     minlon: str,
     maxlon: str,
@@ -520,235 +459,6 @@ def CIequal(str1: str, str2: str) -> bool:
     return str1.casefold() == str2.casefold()
 
 
-def cluster(
-    n_clu: int,
-    path: str,
-    smallname: str,
-    season=None,
-    kind: str = "kmeans",
-    detrended=False,
-    weigh: str = "sqrtcos",
-) -> str:
-    midname = "detrended" if detrended else "anomaly"
-    da = xr.open_dataarray(f"{path}/{smallname}_{midname}.nc")
-    if isinstance(season, list):
-        da = da.isel(time=np.isin(da.time.dt.month, season))
-    elif isinstance(season, str):
-        da = da.isel(time=da.time.dt.season == season)
-    elif season is not None:
-        raise RuntimeError(f"Wrong season specifier : {season}, expected str or list")
-    if CIequal(weigh, "sqrtcos"):
-        da *= np.sqrt(degcos(da.lat))
-    elif CIequal(weigh, "cos"):
-        da *= degcos(da.lat)
-    X = da.values.reshape(len(da.time), -1)
-    if CIequal(kind, "kmeans"):
-        results = KMeans(n_clu, n_init="auto").fit(X)
-        suffix = ""
-    elif CIequal(kind, "kmedoids"):
-        results = KMedoids(n_clu).fit(X)
-        suffix = "med"
-    else:
-        raise NotImplementedError(
-            f"{kind} clustering not implemented. Options are kmeans and kmedoids"
-        )
-    pklpath = f"{path}/k{suffix}{n_clu}_{midname}_{season}_{weigh}.pkl"
-    with open(pklpath, "wb") as handle:
-        pkl.dump(results, handle)
-    return pklpath
-
-
-# Lat and Int
-def compute_JLI(da_Lat: xr.DataArray) -> Tuple[xr.DataArray, xr.DataArray]:
-    """Computes the Jet Latitude Index (also called Lat) as well as the wind speed at the JLI (Int)
-
-    Args:
-        da_Lat (xr.DataArray): zonally averaged smoothed zonal wind time series
-
-    Returns:
-        Lat (xr.DataArray): Jet Latitude Index (see Woollings et al. 2010, Barriopedro et al. 2022)
-        Int (xr.DataArray): Wind speed at the JLI (see Woollings et al. 2010, Barriopedro et al. 2022)
-    """
-    LatI = da_Lat.argmax(dim="lat", skipna=True)
-    Lat = xr.DataArray(
-        da_Lat.lat[LatI.values.flatten()].values, coords={"time": da_Lat.time}
-    ).rename("Lat")
-    Lat.attrs["units"] = "degree_north"
-    Int = da_Lat.isel(lat=LatI).reset_coords("lat", drop=True).rename("Int")
-    Int.attrs["units"] = "m/s"
-    return Lat, Int
-
-
-# Shar, Latn, Lats,
-def compute_shar(
-    da_Lat: xr.DataArray, Int: xr.DataArray, Lat: xr.DataArray
-) -> Tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
-    """Computes sharpness and south + north latitudinal extent of the jet
-
-    Args:
-        da_Lat (xr.DataArray): zonally averaged smoothed zonal wind time series
-        Lat (xr.DataArray): Jet Latitude Index (see Woollings et al. 2010, Barriopedro et al. 2022)
-        Int (xr.DataArray): Wind speed at the JLI (see Woollings et al. 2010, Barriopedro et al. 2022)
-
-    Returns:
-        Shar (xr.DataArray): Sharpness (see Woollings et al. 2010, Barriopedro et al. 2022)
-        Lats (xr.DataArray): Southward latitudinal extent of the jet (see Woollings et al. 2010, Barriopedro et al. 2022)
-        Latn (xr.DataArray): Northward latitudinal extent of the jet (see Woollings et al. 2010, Barriopedro et al. 2022)
-    """
-    Shar = (Int - da_Lat.mean(dim="lat")).rename("Shar")
-    Shar.attrs["units"] = Int.attrs["units"]
-    this = da_Lat - Shar / 2
-    ouais = np.where(this.values[:, 1:] * this.values[:, :-1] < 0)
-    hist = np.histogram(ouais[0], bins=np.arange(len(da_Lat.time) + 1))[0]
-    cumsumhist = np.append([0], np.cumsum(hist)[:-1])
-    Lats = xr.DataArray(
-        da_Lat.lat.values[ouais[1][cumsumhist]],
-        coords={"time": da_Lat.time},
-        name="Lats",
-    )
-    Latn = xr.DataArray(
-        da_Lat.lat.values[ouais[1][cumsumhist + hist - 1]],
-        coords={"time": da_Lat.time},
-        name="Latn",
-    )
-    Latn[Latn < Lat] = da_Lat.lat[-1]
-    Lats[Lats > Lat] = da_Lat.lat[0]
-    Latn.attrs["units"] = "degree_north"
-    Lats.attrs["units"] = "degree_north"
-    return Shar, Lats, Latn
-
-
-# Tilt
-def compute_Tilt(
-    da: xr.DataArray, Lat: xr.DataArray
-) -> Tuple[xr.DataArray, xr.DataArray]:
-    """Computes tilt and also returns the tracked latitudes
-
-    Args:
-        da (xr.DataArray): _description_
-        Lat (xr.DataArray): _description_
-
-    Returns:
-        tuple[xr.DataArray, xr.DataArray]: _description_
-    """
-    trackedLats = (
-        da.isel(lat=0)
-        .copy(data=np.zeros(da.shape[::2]))
-        .reset_coords("lat", drop=True)
-        .rename("Tracked Latitudes")
-    )
-    trackedLats.attrs["units"] = "degree_north"
-    lats = da.lat.values
-    twodelta = lats[2] - lats[0]
-    midpoint = int(len(da.lon) / 2)
-    trackedLats[:, midpoint] = Lat
-    iterator = zip(reversed(range(midpoint)), range(midpoint + 1, len(da.lon)))
-    for lonw, lone in iterator:
-        for k, thislon in enumerate((lonw, lone)):
-            otherlon = thislon - (
-                2 * k - 1
-            )  # previous step in the iterator for either east (k=1, otherlon=thislon-1) or west (k=0, otherlon=thislon+1)
-            mask = (
-                np.abs(trackedLats[:, otherlon].values[:, None] - lats[None, :])
-                > twodelta
-            )
-            # mask = where not to look for a maximum. The next step (forward for east or backward for west) needs to be within twodelta of the previous (otherlon)
-            here = np.ma.argmax(
-                np.ma.array(da.isel(lon=thislon).values, mask=mask), axis=1
-            )
-            trackedLats[:, thislon] = lats[here]
-    Tilt = (
-        trackedLats.polyfit(dim="lon", deg=1)
-        .sel(degree=1)["polyfit_coefficients"]
-        .reset_coords("degree", drop=True)
-        .rename("Tilt")
-    )
-    Tilt.attrs["units"] = "degree_north/degree_east"
-    return trackedLats, Tilt
-
-
-# Lon
-def compute_Lon(
-    da: xr.DataArray, trackedLats: xr.DataArray
-) -> Tuple[xr.DataArray, xr.DataArray]:
-    """_summary_
-
-    Args:
-        da (xr.DataArray): _description_
-        trackedLats (xr.DataArray): _description_
-
-    Returns:
-        tuple[xr.DataArray, xr.DataArray]: _description_
-    """
-    Intlambda = da.sel(lat=trackedLats).reset_coords("lat", drop=True)
-    Intlambdasq = Intlambda * Intlambda
-    lons = xr.DataArray(
-        da.lon.values[None, :] * np.ones(len(da.time))[:, None],
-        coords={"time": da.time, "lon": da.lon},
-    )
-    Lon = (lons * Intlambdasq).sum(dim="lon") / Intlambdasq.sum(dim="lon")
-    Lon.attrs["units"] = "degree_east"
-    return Intlambda, Lon.rename("Lon")
-
-
-# Lonw, Lone
-def compute_Lonew(
-    da: xr.DataArray, Intlambda: xr.DataArray, Lon: xr.DataArray
-) -> Tuple[xr.DataArray, xr.DataArray]:
-    """_summary_
-
-    Args:
-        da (xr.DataArray): _description_
-        Intlambda (xr.DataArray): _description_
-        Lon (xr.DataArray): _description_
-
-    Returns:
-        tuple[xr.DataArray, xr.DataArray]: _description_
-    """
-    Intlambda = Intlambda.values
-    Mean = np.mean(Intlambda, axis=1)
-    lon = da.lon.values
-    iLon = np.argmax(lon[None, :] - Lon.values[:, None] > 0, axis=1)
-    basearray = Intlambda - Mean[:, None] < 0
-    iLonw = (
-        np.ma.argmin(
-            np.ma.array(basearray, mask=lon[None, :] > Lon.values[:, None]), axis=1
-        )
-        - 1
-    )
-    iLone = (
-        np.ma.argmax(
-            np.ma.array(basearray, mask=lon[None, :] <= Lon.values[:, None]), axis=1
-        )
-        - 1
-    )
-    Lonw = xr.DataArray(lon[iLonw], coords={"time": da.time}, name="Lonw")
-    Lone = xr.DataArray(lon[iLone], coords={"time": da.time}, name="Lone")
-    Lonw.attrs["units"] = "degree_east"
-    Lone.attrs["units"] = "degree_east"
-    return Lonw, Lone
-
-
-# Dep
-def compute_Dep(da: xr.DataArray, trackedLats: xr.DataArray) -> xr.DataArray:
-    """_summary_
-
-    Args:
-        da (xr.DataArray): _description_
-        trackedLats (xr.DataArray): _description_
-
-    Returns:
-        xr.DataArray: _description_
-    """
-    phistarl = xr.DataArray(
-        da.lat.values[da.argmax(dim="lat").values],
-        coords={"time": da.time.values, "lon": da.lon.values},
-    )
-    Dep = np.sqrt((phistarl - trackedLats) ** 2).sum(dim="lon").rename("Dep")
-    Dep.attrs["units"] = "degree_north"
-    return Dep
-
-
 def meandering(lines):
     m = 0
     for line in lines:
@@ -764,58 +474,480 @@ def one_ts(lon, lat, da):
     return np.amax(m)
 
 
-def compute_Mea(da: xr.DataArray, njobs: int = 32) -> xr.DataArray:
-    lon = da.lon.values
-    lat = da.lat.values
-    M = Parallel(n_jobs=32, backend="loky", max_nbytes=1e5)(
-        delayed(one_ts)(lon, lat, da.sel(time=t).values) for t in da.time[:]
-    )
-    return xr.DataArray(M, coords={"time": da.time})
+@dataclass(init=False)
+class Experiment(object):
+    dataset: str
+    variable: str
+    level: int | str
+    region: str
+    minlon: int
+    maxlon: int
+    minlat: int
+    maxlat: int
+    path: str
+
+    def __init__(
+        self,
+        dataset: str,
+        variable: str,
+        level: int | str,
+        region: Optional[str] = None,
+        smallname: Optional[str] = None,
+        minlon: Optional[int | float] = None,
+        maxlon: Optional[int | float] = None,
+        minlat: Optional[int | float] = None,
+        maxlat: Optional[int | float] = None,
+        smooth: bool = False,
+    ):
+        self.dataset = dataset
+        self.variable = variable
+        self.level = str(level)
+        if smallname is None:
+            self.smallname = SMALLNAME[variable]
+        else:
+            self.smallname = smallname
+        if region is None:
+            if np.any([bound is None for bound in [minlon, maxlon, minlat, maxlat]]):
+                raise ValueError(
+                    "Specify a region with either a string or 4 ints / floats"
+                )
+            self.region = f"box_{int(minlon)}_{int(maxlon)}_{int(minlat)}_{int(maxlat)}"
+        else:
+            self.region = region
+
+        try:
+            self.minlon, self.maxlon, self.minlat, self.maxlat = [
+                int(bound) for bound in self.region.split("_")[-4:]
+            ]
+        except ValueError:
+            if self.region == "dailymean":
+                self.minlon, self.maxlon, self.minlat, self.maxlat = (
+                    -180,
+                    179.5,
+                    -90,
+                    90,
+                )
+            else:
+                raise ValueError(f"{region=}, wrong specifier")
+        self.path = Path(DATADIR, self.dataset, self.variable, self.level, self.region)
+        self.copy_content(cdo, smooth)
+
+    def ifile(self, suffix: str = "") -> Path:
+        underscore = "" if suffix == "" else "_"
+        joinpath = f"{self.smallname}{underscore}{suffix}.nc"
+        return self.path.parent.joinpath("dailymean").joinpath(joinpath)
+
+    def ofile(self, suffix: str = "") -> Path:
+        underscore = "" if suffix == "" else "_"
+        joinpath = f"{self.smallname}{underscore}{suffix}.nc"
+        return self.path.joinpath(joinpath)
+
+    def open_da(self, suffix: str = "") -> xr.DataArray:
+        return xr.open_dataset(self.ofile(suffix))[self.smallname]
+
+    def detrend(self):
+        da = self.open_da()
+        try:
+            da = da.rename({"longitude": "lon", "latitude": "lat"})
+        except ValueError:
+            pass
+        da = da.chunk({"time": -1, "lon": 20, "lat": 20})
+        if da.attrs["units"] == "m**2 s**-2":
+            da /= co.g
+            da.attrs["units"] = "m"
+        anomaly = xr.map_blocks(compute_anomaly, da, template=da)
+        detrended = xr.map_blocks(
+            xrft.detrend, anomaly, args=("time", "linear"), template=da
+        )
+        anomaly.to_netcdf(self.ofile("anomaly"))
+        detrended.to_netcdf(self.ofile("detrended"))
+
+    def smooth(self):
+        da = self.open_da()
+        resolution = da.lon[1] - da.lon[0]
+        winsize = int(60 / resolution)
+        halfwinsize = int(winsize / 2)
+        mode = "wrap" if self.region == "dailymean" else "edge"
+        da2 = (
+            da.pad(lon=halfwinsize, mode=mode)
+            .rolling(lon=winsize, center=True)
+            .mean()[:, :, halfwinsize:-halfwinsize]
+        )
+        da_fft = xrft.fft(da2, dim="time")
+        da_fft[np.abs(da_fft.freq_time) > 1 / 10 / 24 / 3600] = 0
+        da3 = (
+            xrft.ifft(da_fft, dim="freq_time", true_phase=True, true_amplitude=True)
+            .real.assign_coords(time=da.time)
+            .rename(self.smallname)
+        )
+        da2.attrs["unit"] = "m/s"
+        da3.attrs["unit"] = "m/s"
+        da3["lon"] = da.lon
+        da3.to_netcdf(self.ofile("smooth"))
+
+    def copy_content(self, cdo: Cdo, smooth: bool = False):
+        if not self.path.is_dir():
+            os.mkdir(self.path)
+        ifile = self.ifile("")
+        ofile = self.ofile("")
+        if not ofile.is_file():
+            cdo.sellonlatbox(
+                self.minlon,
+                self.maxlon,
+                self.minlat,
+                self.maxlat,
+                input=ifile.as_posix(),
+                output=ofile.as_posix(),
+            )
+        to_iterate = ["detrended", "anomaly"]
+        if smooth:
+            to_iterate.append("smooth")
+        for modified in to_iterate:
+            ifile = self.ifile(modified)
+            ofile = self.ofile(modified)
+            if ofile.is_file():
+                continue
+            if ifile.is_file():
+                cdo.sellonlatbox(
+                    self.minlon,
+                    self.maxlon,
+                    self.minlat,
+                    self.maxlat,
+                    input=ifile.as_posix(),
+                    output=ofile.as_posix(),
+                )
+                continue
+            if modified in ["detrended", "anomaly"]:
+                self.detrend()
+            else:
+                self.smooth()
 
 
-def compute_Zoo(basepath: str, box: str, detrend=False):
-    daZ = xr.open_dataset(f"{basepath}/Geopotential/500/{box}/z.nc")["z"].squeeze()
-    da = xr.open_dataset(f"{basepath}/Wind/Low/{box}/u_smooth.nc")["u"]
-    da_Lat = (
-        xr.open_dataset(f"{basepath}/Wind/Low/dailymean/u.nc")["u"]
-        .sel(lon=da.lon, lat=da.lat)
-        .mean(dim="lon")
-    )
-    Lat, Int = compute_JLI(da_Lat)
-    Shar, Lats, Latn = compute_shar(da_Lat, Int, Lat)
-    trackedLats, Tilt = compute_Tilt(da, Lat)
-    Intlambda, Lon = compute_Lon(da, trackedLats)
-    Lonw, Lone = compute_Lonew(da, Intlambda, Lon)
-    Dep = compute_Dep(da, trackedLats)
-    Mea = compute_Mea(daZ)
-    Zoo = xr.Dataset(
-        {
-            "Lat": Lat,
-            "Int": Int,
-            "Shar": Shar,
-            "Lats": Lats,
-            "Latn": Latn,
-            "Tilt": Tilt,
-            "Lon": Lon,
-            "Lonw": Lonw,
-            "Lone": Lone,
-            "Dep": Dep,
-            "Mea": Mea,
-        }
-    ).dropna(
-        dim="time"
-    )  # dropna if time does not match between z and u (happens for NCEP)
-    if not detrend:
-        Zoo.to_netcdf(f"{basepath}/Wind/Low/{box}/Zoo.nc")
-        return
-    for key, value in Zoo.data_vars.items():
-        Zoo[f"{key}_anomaly"], Zoo[f"{key}_climatology"] = compute_anomaly(
-            value, return_clim=True, smooth_kmax=3
+class ClusteringExperiment(Experiment):
+    def prepare_for_clustering(
+        self, suffix: str = "anomaly", season: list | str = None, weigh: str = "sqrtcos"
+    ) -> Tuple[NDArray, xr.DataArray]:
+        da = self.open_da(suffix)
+        if isinstance(season, list):
+            da.isel(time=np.isin(da.time.dt.month, season))
+        elif isinstance(season, str):
+            if season in ["DJF", "MAM", "JJA", "SON"]:
+                da = da.isel(time=da.time.dt.season == season)
+            else:
+                raise ValueError(
+                    f"Wrong season specifier : {season} is not a valid xarray season"
+                )
+        if CIequal(weigh, "sqrtcos"):
+            da *= np.sqrt(degcos(da.lat))
+        elif CIequal(weigh, "cos"):
+            da *= degcos(da.lat)
+        elif weigh is not None:
+            raise ValueError(f"Wrong weigh specifier : {weigh}")
+        X = da.values.reshape(len(da.time), -1)
+        return X, da
+
+    def do_pca(
+        self,
+        n_components: int,
+        midfix: str = "anomaly",
+        season: list | str = None,
+        weigh: str = "sqrtcos",
+    ) -> str:
+        X, _ = self.prepare_for_clustering(midfix, season, weigh)
+        results = pca(n_components=n_components, whiten=True).fit(X)
+        picklepath = self.path.joinpath(f"pca_{n_components}_{season}.pkl")
+        with open(picklepath, "wb") as handle:
+            pkl.dump(results, handle)
+        return picklepath
+
+    def cluster(
+        self,
+        n_clu: int,
+        midfix: str = "anomaly",
+        season: list | str = None,
+        weigh: str = "sqrtcos",
+        kind: str = "kmeans",
+    ) -> str:
+        X, _ = self.prepare_for_clustering(midfix, season, weigh)
+        if CIequal(kind, "kmeans"):
+            results = KMeans(n_clu, n_init="auto").fit(X)
+            suffix = ""
+        elif CIequal(kind, "kmedoids"):
+            results = KMedoids(n_clu).fit(X)
+            suffix = "med"
+        else:
+            raise NotImplementedError(
+                f"{kind} clustering not implemented. Options are kmeans and kmedoids"
+            )
+        picklepath = self.path.joinpath(
+            f"k{suffix}_{n_clu}_{midfix}_{season}_{weigh}.pkl"
         )
-        Zoo[f"{key}_detrended"] = xrft.detrend(
-            Zoo[f"{key}_anomaly"], dim="time", detrend_type="linear"
+        with open(picklepath, "wb") as handle:
+            pkl.dump(results, handle)
+        return picklepath
+
+
+@dataclass(init=False)
+class ZooExperiment(object):
+    def __init__(
+        self,
+        dataset: str,
+        region: Optional[str],
+        minlon: Optional[int | float],
+        maxlon: Optional[int | float],
+        minlat: Optional[int | float],
+        maxlat: Optional[int | float],
+    ):
+        self.dataset = dataset
+        self.exp_u = Experiment(
+            dataset, "Wind", "Low", region, minlon, maxlon, minlat, maxlat
         )
-    Zoo.to_netcdf(f"{basepath}/Wind/Low/{box}/Zoo.nc")
+        self.exp_z = Experiment(
+            dataset, "Geopotential", "500", region, minlon, maxlon, minlat, maxlat
+        )
+        self.region = self.exp_u.region
+        self.minlon = self.exp_u.minlon
+        self.maxlon = self.exp_u.maxlon
+        self.minlat = self.exp_u.minlat
+        self.maxlat = self.exp_u.maxlat
+        self.da_wind = self.exp_u.open_da("smooth").squeeze()
+        self.da_wind_zonal_mean = (
+            xr.open_dataset(self.exp_u.ifile())[self.exp_u.smallname]
+            .sel(lon=self.da_wind.lon, lat=self.da_wind.lat)
+            .mean(dim="lon")
+        )
+        self.da_z = self.exp_z.open_da().squeeze()
+
+    def compute_JLI(self) -> Tuple[xr.DataArray, xr.DataArray]:
+        """Computes the Jet Latitude Index (also called Lat) as well as the wind speed at the JLI (Int)
+
+        Args:
+
+        Returns:
+            Lat (xr.DataArray): Jet Latitude Index (see Woollings et al. 2010, Barriopedro et al. 2022)
+            Int (xr.DataArray): Wind speed at the JLI (see Woollings et al. 2010, Barriopedro et al. 2022)
+        """
+        da_Lat = self.da_wind_zonal_mean
+        LatI = da_Lat.argmax(dim="lat", skipna=True)
+        self.Lat = xr.DataArray(
+            da_Lat.lat[LatI.values.flatten()].values, coords={"time": da_Lat.time}
+        ).rename("Lat")
+        self.Lat.attrs["units"] = "degree_north"
+        self.Int = (
+            da_Lat.isel(lat=self.LatI).reset_coords("lat", drop=True).rename("Int")
+        )
+        self.Int.attrs["units"] = "m/s"
+        return self.Lat, self.Int
+
+    def compute_Shar(self) -> Tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
+        """Computes sharpness and south + north latitudinal extent of the jet
+
+        Args:
+
+        Returns:
+            Shar (xr.DataArray): Sharpness (see Woollings et al. 2010, Barriopedro et al. 2022)
+            Lats (xr.DataArray): Southward latitudinal extent of the jet (see Woollings et al. 2010, Barriopedro et al. 2022)
+            Latn (xr.DataArray): Northward latitudinal extent of the jet (see Woollings et al. 2010, Barriopedro et al. 2022)
+        """
+        da_Lat = self.da_wind_zonal_mean
+        self.Shar = (self.Int - da_Lat.mean(dim="lat")).rename("Shar")
+        self.Shar.attrs["units"] = self.Int.attrs["units"]
+        difference_with_shar = da_Lat - self.Shar / 2
+        roots = np.where(
+            difference_with_shar.values[:, 1:] * difference_with_shar.values[:, :-1] < 0
+        )
+        hist = np.histogram(roots[0], bins=np.arange(len(da_Lat.time) + 1))[0]
+        cumsumhist = np.append([0], np.cumsum(hist)[:-1])
+        self.Lats = xr.DataArray(
+            da_Lat.lat.values[roots[1][cumsumhist]],
+            coords={"time": da_Lat.time},
+            name="Lats",
+        )
+        self.Latn = xr.DataArray(
+            da_Lat.lat.values[roots[1][cumsumhist + hist - 1]],
+            coords={"time": da_Lat.time},
+            name="Latn",
+        )
+        self.Latn[self.Latn < self.Lat] = da_Lat.lat[-1]
+        self.Lats[self.Lats > self.Lat] = da_Lat.lat[0]
+        self.Latn.attrs["units"] = "degree_north"
+        self.Lats.attrs["units"] = "degree_north"
+        return self.Shar, self.Lats, self.Latn
+
+    def compute_Tilt(self) -> Tuple[xr.DataArray, xr.DataArray]:
+        """Computes tilt and also returns the tracked latitudes
+
+        Args:
+
+        Returns:
+            tuple[xr.DataArray, xr.DataArray]: _description_
+        """
+        self.trackedLats = (
+            self.da_wind.isel(lat=0)
+            .copy(data=np.zeros(self.da_wind.shape[::2]))
+            .reset_coords("lat", drop=True)
+            .rename("Tracked Latitudes")
+        )
+        self.trackedLats.attrs["units"] = "degree_north"
+        lats = self.da_wind.lat.values
+        twodelta = lats[2] - lats[0]
+        midpoint = int(len(self.da_wind.lon) / 2)
+        self.trackedLats[:, midpoint] = self.Lat
+        iterator = zip(
+            reversed(range(midpoint)), range(midpoint + 1, len(self.da_wind.lon))
+        )
+        for lonw, lone in iterator:
+            for k, thislon in enumerate((lonw, lone)):
+                otherlon = thislon - (
+                    2 * k - 1
+                )  # previous step in the iterator for either east (k=1, otherlon=thislon-1) or west (k=0, otherlon=thislon+1)
+                mask = (
+                    np.abs(
+                        self.trackedLats[:, otherlon].values[:, None] - lats[None, :]
+                    )
+                    > twodelta
+                )
+                # mask = where not to look for a maximum. The next step (forward for east or backward for west) needs to be within twodelta of the previous (otherlon)
+                here = np.ma.argmax(
+                    np.ma.array(self.da_wind.isel(lon=thislon).values, mask=mask),
+                    axis=1,
+                )
+                self.trackedLats[:, thislon] = lats[here]
+        self.Tilt = (
+            self.trackedLats.polyfit(dim="lon", deg=1)
+            .sel(degree=1)["polyfit_coefficients"]
+            .reset_coords("degree", drop=True)
+            .rename("Tilt")
+        )
+        self.Tilt.attrs["units"] = "degree_north/degree_east"
+        return self.trackedLats, self.Tilt
+
+    def compute_Lon(self) -> Tuple[xr.DataArray, xr.DataArray]:
+        """_summary_
+
+        Args:
+
+        Returns:
+            tuple[xr.DataArray, xr.DataArray]: _description_
+        """
+        self.Intlambda = self.da_wind.sel(lat=self.trackedLats).reset_coords(
+            "lat", drop=True
+        )
+        Intlambdasq = self.Intlambda * self.Intlambda
+        lons = xr.DataArray(
+            self.da_wind.lon.values[None, :] * np.ones(len(self.da_wind.time))[:, None],
+            coords={"time": self.da_wind.time, "lon": self.da_wind.lon},
+        )
+        self.Lon = (lons * Intlambdasq).sum(dim="lon") / Intlambdasq.sum(dim="lon")
+        self.Lon.attrs["units"] = "degree_east"
+        self.Lon = self.Lon.rename("Lon")
+        return self.Intlambda, self.Lon
+
+    def compute_Lonew(self) -> Tuple[xr.DataArray, xr.DataArray]:
+        """_summary_
+
+        Args:
+
+        Returns:
+            tuple[xr.DataArray, xr.DataArray]: _description_
+        """
+        Intlambda = self.Intlambda.values
+        Mean = np.mean(Intlambda, axis=1)
+        lon = self.da_wind.lon.values
+        iLon = np.argmax(lon[None, :] - self.Lon.values[:, None] > 0, axis=1)
+        basearray = Intlambda - Mean[:, None] < 0
+        iLonw = (
+            np.ma.argmin(
+                np.ma.array(basearray, mask=lon[None, :] > self.Lon.values[:, None]),
+                axis=1,
+            )
+            - 1
+        )
+        iLone = (
+            np.ma.argmax(
+                np.ma.array(basearray, mask=lon[None, :] <= self.Lon.values[:, None]),
+                axis=1,
+            )
+            - 1
+        )
+        self.Lonw = xr.DataArray(
+            lon[iLonw], coords={"time": self.da_wind.time}, name="Lonw"
+        )
+        self.Lone = xr.DataArray(
+            lon[iLone], coords={"time": self.da_wind.time}, name="Lone"
+        )
+        self.Lonw.attrs["units"] = "degree_east"
+        self.Lone.attrs["units"] = "degree_east"
+        return self.Lonw, self.Lone
+
+    def compute_Dep(self) -> xr.DataArray:
+        """_summary_
+
+        Args:
+
+        Returns:
+            xr.DataArray: _description_
+        """
+        phistarl = xr.DataArray(
+            self.da_wind.lat.values[self.da_wind.argmax(dim="lat").values],
+            coords={"time": self.da_wind.time.values, "lon": self.da_wind.lon.values},
+        )
+        self.Dep = (
+            np.sqrt((phistarl - self.trackedLats) ** 2).sum(dim="lon").rename("Dep")
+        )
+        self.Dep.attrs["units"] = "degree_north"
+        return self.Dep
+
+    def compute_Mea(self, njobs: int = 32) -> xr.DataArray:
+        lon = self.da_wind.lon.values
+        lat = self.da_wind.lat.values
+        Mea = Parallel(n_jobs=njobs, backend="loky", max_nbytes=1e5)(
+            delayed(one_ts)(lon, lat, self.da_wind.sel(time=t).values)
+            for t in self.da_wind.time[:]
+        )
+        self.Mea = xr.DataArray(
+            self.Mea, coords={"time": self.da_wind.time}, name="Mea"
+        )
+        return self.Mea
+
+    def compute_Zoo(self, detrend=False):
+        _ = self.compute_JLI()
+        _ = self.compute_Shar()
+        _ = self.compute_Tilt()
+        _ = self.compute_Lon()
+        _ = self.compute_Lonew()
+        _ = self.compute_Dep()
+        _ = self.compute_Mea()
+
+        Zoo = xr.Dataset(
+            {
+                "Lat": self.Lat,
+                "Int": self.Int,
+                "Shar": self.Shar,
+                "Lats": self.Lats,
+                "Latn": self.Latn,
+                "Tilt": self.Tilt,
+                "Lon": self.Lon,
+                "Lonw": self.Lonw,
+                "Lone": self.Lone,
+                "Dep": self.Dep,
+                "Mea": self.Mea,
+            }
+        ).dropna(
+            dim="time"
+        )  # dropna if time does not match between z and u (happens for NCEP)
+        if not detrend:
+            self.exp_u.path.joinpath("Zoo.nc")
+            Zoo.to_netcdf(self.exp_u.path.joinpath("Zoo.nc"))
+            return
+        for key, value in Zoo.data_vars.items():
+            Zoo[f"{key}_anomaly"], Zoo[f"{key}_climatology"] = compute_anomaly(
+                value, return_clim=True, smooth_kmax=3
+            )
+            Zoo[f"{key}_detrended"] = xrft.detrend(
+                Zoo[f"{key}_anomaly"], dim="time", detrend_type="linear"
+            )
+        Zoo.to_netcdf(self.exp_u.path.joinpath("Zoo.nc"))
 
 
 # SOMperf stuff
@@ -866,4 +998,3 @@ def smooth_hex(
     return np.sum(
         (quantity[None, :] * (precomputed_distances <= k_nn).astype(int)), axis=1
     ) / np.sum(precomputed_distances[0, :] <= k_nn)
-
