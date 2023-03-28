@@ -1,8 +1,14 @@
 import os
 import glob
+import logging
 import platform
 import contourpy
 import numpy as np
+
+try:
+    import cupy as cp  # won't work on cpu nodes
+except ImportError:
+    pass
 import pandas as pd
 import xarray as xr
 import xrft
@@ -20,7 +26,9 @@ from matplotlib.colorbar import Colorbar
 from matplotlib.container import BarContainer
 import cartopy.crs as ccrs
 import cartopy.feature as feat
+from simpsom import SOMNet
 from scipy.stats import gaussian_kde, norm as normal_dist
+from scipy import linalg
 from typing import Union, Any, Tuple, Optional
 from nptyping import NDArray, Object, Shape, Int, Float
 from dataclasses import dataclass
@@ -32,7 +40,7 @@ from joblib import delayed, Parallel
 from sklearn.metrics.pairwise import euclidean_distances
 from cdo import Cdo
 
-
+logging.basicConfig(level=logging.DEBUG)
 pf = platform.platform()
 if pf.find("cray") >= 0:
     NODE = "DAINT"
@@ -542,25 +550,18 @@ class Experiment(object):
         joinpath = f"{self.smallname}{underscore}{suffix}.nc"
         return self.path.joinpath(joinpath)
 
-    def open_da(self, suffix: str = "") -> xr.DataArray:
-        return xr.open_dataset(self.ofile(suffix))[self.smallname]
+    def open_da(self, suffix: str = "", **kwargs) -> xr.DataArray:
+        return xr.open_dataset(self.ofile(suffix), **kwargs)[self.smallname]
 
     def detrend(self):
-        da = self.open_da()
-        try:
-            da = da.rename({"longitude": "lon", "latitude": "lat"})
-        except ValueError:
-            pass
-        da = da.chunk({"time": -1, "lon": 20, "lat": 20})
+        da = self.open_da(chunks={"time": -1, "lon": 20, "lat": 20})
         if da.attrs["units"] == "m**2 s**-2":
             da /= co.g
             da.attrs["units"] = "m"
-        anomaly = xr.map_blocks(compute_anomaly, da, template=da)
-        detrended = xr.map_blocks(
-            xrft.detrend, anomaly, args=("time", "linear"), template=da
-        )
+        anomaly = xr.map_blocks(compute_anomaly, da, template=da).compute()
         anomaly.to_netcdf(self.ofile("anomaly"))
-        detrended.to_netcdf(self.ofile("detrended"))
+        anomaly = xrft.detrend(anomaly, "time", "linear").compute()
+        anomaly.to_netcdf(self.ofile("detrended"))
 
     def smooth(self):
         da = self.open_da()
@@ -623,68 +624,264 @@ class Experiment(object):
                 self.smooth()
 
 
+@dataclass(init=False)
 class ClusteringExperiment(Experiment):
-    def prepare_for_clustering(
-        self, suffix: str = "anomaly", season: list | str = None, weigh: str = "sqrtcos"
-    ) -> Tuple[NDArray, xr.DataArray]:
-        da = self.open_da(suffix)
-        if isinstance(season, list):
-            da.isel(time=np.isin(da.time.dt.month, season))
-        elif isinstance(season, str):
-            if season in ["DJF", "MAM", "JJA", "SON"]:
-                da = da.isel(time=da.time.dt.season == season)
-            else:
-                raise ValueError(
-                    f"Wrong season specifier : {season} is not a valid xarray season"
-                )
-        if CIequal(weigh, "sqrtcos"):
-            da *= np.sqrt(degcos(da.lat))
-        elif CIequal(weigh, "cos"):
-            da *= degcos(da.lat)
-        elif weigh is not None:
-            raise ValueError(f"Wrong weigh specifier : {weigh}")
-        X = da.values.reshape(len(da.time), -1)
-        return X, da
+    midfix: str = "anomaly"
+    season: list | str = None
+    weigh: str = "sqrtcos"
 
-    def do_pca(
+    def __init__(
         self,
-        n_components: int,
+        dataset: str,
+        variable: str,
+        level: int | str,
+        region: Optional[str] = None,
+        smallname: Optional[str] = None,
+        minlon: Optional[int | float] = None,
+        maxlon: Optional[int | float] = None,
+        minlat: Optional[int | float] = None,
+        maxlat: Optional[int | float] = None,
+        smooth: bool = False,
         midfix: str = "anomaly",
         season: list | str = None,
         weigh: str = "sqrtcos",
-    ) -> str:
-        X, _ = self.prepare_for_clustering(midfix, season, weigh)
-        results = pca(n_components=n_components, whiten=True).fit(X)
-        picklepath = self.path.joinpath(f"pca_{n_components}_{season}.pkl")
-        with open(picklepath, "wb") as handle:
+    ):
+        super().__init__(
+            dataset,
+            variable,
+            level,
+            region,
+            smallname,
+            minlon,
+            maxlon,
+            minlat,
+            maxlat,
+            smooth,
+        )
+        self.midfix = midfix
+        self.season = season
+        if weigh is not None and weigh not in ["sqrtcos", "cos"]:
+            raise ValueError(f"Wrong weigh specifier : {self.weigh}")
+        self.weigh = weigh
+
+    def prepare_for_clustering(self) -> Tuple[NDArray, xr.DataArray]:
+        da = self.open_da(self.midfix)
+        if isinstance(self.season, list):
+            da.isel(time=np.isin(da.time.dt.month, self.season))
+        elif isinstance(self.season, str):
+            if self.season in ["DJF", "MAM", "JJA", "SON"]:
+                da = da.isel(time=da.time.dt.season == self.season)
+            else:
+                raise ValueError(
+                    f"Wrong season specifier : {self.season} is not a valid xarray season"
+                )
+        if CIequal(self.weigh, "sqrtcos"):
+            da *= np.sqrt(degcos(da.lat))
+        elif CIequal(self.weigh, "cos"):
+            da *= degcos(da.lat)
+        X = da.values.reshape(len(da.time), -1)
+        return X, da
+
+    def do_pca(self, n_pcas: int, force: bool = False) -> str:
+        glob_string = f"pca_*_{self.midfix}_{self.season}.pkl"
+        logging.debug(glob_string)
+        potential_paths = [
+            Path(path) for path in glob.glob(self.path.joinpath(glob_string).as_posix())
+        ]
+        potential_paths = {
+            path: int(path.parts[-1].split("_")[1]) for path in potential_paths
+        }
+        found = False
+        logging.debug(potential_paths)
+        for key, value in potential_paths.items():
+            if value >= n_pcas:
+                found = True
+                break
+        if found and not force:
+            return key
+        X, _ = self.prepare_for_clustering()
+        pca_path = self.path.joinpath(f"pca_{n_pcas}_{self.season}.pkl")
+        results = pca(n_components=n_pcas, whiten=True).fit(X)
+        with open(pca_path, "wb") as handle:
             pkl.dump(results, handle)
-        return picklepath
+        return pca_path
+
+    def pca_transform(
+        self,
+        X: NDArray[Shape["*, *"], Float],
+        n_pcas: int = None,
+    ) -> NDArray[Shape["*, *"], Float]:
+        if n_pcas is not None:
+            pca_path = self.do_pca(n_pcas)
+            with open(pca_path, "rb") as handle:
+                pca_results = pkl.load(handle)
+            return pca_results.transform(X)[:, :n_pcas]
+        return X
+
+    def pca_inverse_transform(
+        self,
+        X: NDArray[Shape["*, *"], Float],
+        n_pcas: int = None,
+    ) -> NDArray[Shape["*, *"], Float]:
+        if n_pcas is not None:
+            pca_path = self.do_pca(n_pcas)
+            with open(pca_path, "rb") as handle:
+                pca_results = pkl.load(handle)
+            diff_n_pcas = pca_results.n_components - pca_path
+            X = np.pad(X, [[0, 0], [0, diff_n_pcas]])
+            return pca_results.inverse_transform(X)
+        return X
+
+    def to_dataarray(
+        self,
+        centers: NDArray[Shape["*, *"], Float],
+        da: xr.DataArray,
+        n_pcas: Optional[int],
+        coords: dict,
+    ) -> xr.DataArray:
+        centers = self.pca_inverse_transform(centers, n_pcas)
+        shape = [len(coord) for coord in coords.values]
+        centers = xr.DataArray(centers.reshape(shape), coords=coords)
+        if CIequal(self.weigh, "sqrtcos"):
+            centers /= np.sqrt(degcos(da.lat))
+        elif CIequal(self.weigh, "cos"):
+            centers /= degcos(da.lat)
+        return centers
 
     def cluster(
         self,
         n_clu: int,
-        midfix: str = "anomaly",
-        season: list | str = None,
-        weigh: str = "sqrtcos",
+        n_pcas: int = None,
         kind: str = "kmeans",
-    ) -> str:
-        X, _ = self.prepare_for_clustering(midfix, season, weigh)
+        return_centers: bool = True,
+    ) -> str | Tuple[xr.DataArray, str]:
+        X, da = self.prepare_for_clustering()
+        X = self.pca_transform(X, n_pcas)
         if CIequal(kind, "kmeans"):
-            results = KMeans(n_clu, n_init="auto").fit(X)
+            results = KMeans(n_clu, n_init="auto")
             suffix = ""
         elif CIequal(kind, "kmedoids"):
-            results = KMedoids(n_clu).fit(X)
+            results = KMedoids(n_clu)
             suffix = "med"
         else:
             raise NotImplementedError(
                 f"{kind} clustering not implemented. Options are kmeans and kmedoids"
             )
         picklepath = self.path.joinpath(
-            f"k{suffix}_{n_clu}_{midfix}_{season}_{weigh}.pkl"
+            f"k{suffix}_{n_clu}_{self.midfix}_{self.season}_{self.weigh}.pkl"
         )
-        with open(picklepath, "wb") as handle:
-            pkl.dump(results, handle)
-        return picklepath
+        if picklepath.is_file():
+            with open(picklepath, "rb") as handle:
+                results = pkl.load(handle)
+        else:
+            results = results.fit(X)
+            with open(picklepath, "wb") as handle:
+                pkl.dump(results, handle)
+        if not return_centers:
+            return picklepath
+        if isinstance(results, KMeans):
+            centers = results.cluster_centers_
+            coords = {
+                "cluster": np.arange(centers.shape[0]),
+                "lat": da.lat.values,
+                "lon": da.lon.values,
+            }
+            centers = self.to_dataarray(da, n_pcas, centers, coords)
+        elif isinstance(results, KMedoids):
+            centers = (
+                da.isel(time=results.medoids)
+                .rename({"time": "cluster"})
+                .assign_coords({"cluster": np.arange(len(results.medoids))})
+            )
+        return centers, picklepath
+
+    def do_opp(
+        self,
+        lag_max: int = 15,
+        coords: dict = None,  # if specified this function will return
+    ) -> Tuple[NDArray, NDArray] | Tuple[NDArray, xr.DataArray]:
+        X, da = self.prepare_for_clustering()
+        X = self.pca_transform(X, n_pcas)
+        X = X.reshape((X.shape[0], -1))
+        n_pcas = X.shape[1]
+        autocorrs = []
+        for j in range(lag_max):
+            autocorrs.append(
+                np.cov(X[j:], X(time=j).values[j:], rowvar=False)[n_pcas:, :n_pcas]
+            )
+
+        autocorrs = np.asarray(autocorrs)
+        M = autocorrs[0] + np.sum(
+            [autocorrs[i] + autocorrs[i].transpose() for i in range(1, lag_max)], axis=0
+        )
+
+        invsqrtC0 = linalg.inv(linalg.sqrtm(autocorrs[0]))
+        symS = invsqrtC0.T @ M @ invsqrtC0
+        eigenvals, eigenvecs = linalg.eigh(symS)
+        OPPs = autocorrs[0] @ (invsqrtC0 @ eigenvecs.T)
+        idx = np.argsort(eigenvals)[::-1]
+        eigenvals = eigenvals[idx]
+        OPPs = OPPs[idx]
+        if coords is None:
+            return eigenvals, OPPs
+        coords = {
+            "OPP": np.arange(OPPs.shape[0]),
+            "lat": da.lat.values,
+            "lon": da.lon.values,
+        }
+        OPPs = self.to_dataarray(OPPs, da, n_pcas, coords)
+        return eigenvals, OPPs
+
+    def do_som(
+        self,
+        nx: int,
+        ny: int,
+        n_pcas: int = None,
+        OPP: bool = False,
+        GPU: bool = False,
+        return_centers: bool = False,
+        train_kwargs: dict = None,
+        **kwargs,
+    ) -> SOMNet | Tuple[SOMNet, xr.DataArray]:
+        if n_pcas is None and OPP:
+            logging.warning("OPP flag will be ignored because n_pcas is set to None")
+
+        output_path = self.path.joinpath(
+            f"som_{nx}_{ny}_{self.midfix}_{self.season}_{self.weigh}{'_OPP' if OPP else ''}.npy"
+        )
+
+        if output_path.is_file() and not return_centers:
+            return output_path
+        if OPP:
+            _, X = self.do_opp()
+            da = self.open_da(self.midfix)
+        else:
+            X, da = self.prepare_for_clustering()
+            X = self.pca_transform(X, n_pcas)
+        if GPU:
+            reduced = cp.asarray(reduced)
+        if output_path.is_file():
+            net = SOMNet(nx, ny, reduced, load_file=output_path)
+        else:
+            net = SOMNet(  # TODO : implement own SOM class
+                nx, ny, reduced, PBC=True, GPU=GPU, **kwargs, output_path=output_path
+            )
+            net.train(**train_kwargs)
+        if not return_centers:
+            return net
+        if GPU:
+            centers = np.asarray([node.weights.get() for node in net.nodes_list])
+        else:
+            centers = np.asarray([node.weights for node in net.nodes_list])
+        centers = self.pca_inverse_transform(centers, n_pcas)
+        coords = {
+            "x": np.arange(nx),
+            "y": np.arange(ny),
+            "lat": da.lat.values,
+            "lon": da.lon.values,
+        }
+        centers = self.to_dataarray(centers, da, n_pcas, coords)
+        return net, centers
 
 
 @dataclass(init=False)
