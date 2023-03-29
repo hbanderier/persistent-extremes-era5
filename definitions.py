@@ -40,7 +40,7 @@ from joblib import delayed, Parallel
 from sklearn.metrics.pairwise import euclidean_distances
 from cdo import Cdo
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.WARNING)
 pf = platform.platform()
 if pf.find("cray") >= 0:
     NODE = "DAINT"
@@ -700,8 +700,9 @@ class ClusteringExperiment(Experiment):
         if found and not force:
             return key
         X, _ = self.prepare_for_clustering()
-        pca_path = self.path.joinpath(f"pca_{n_pcas}_{self.season}.pkl")
+        pca_path = self.path.joinpath(f"pca_{n_pcas}_{self.midfix}_{self.season}.pkl")
         results = pca(n_components=n_pcas, whiten=True).fit(X)
+        logging.debug(pca_path)
         with open(pca_path, "wb") as handle:
             pkl.dump(results, handle)
         return pca_path
@@ -727,7 +728,7 @@ class ClusteringExperiment(Experiment):
             pca_path = self.do_pca(n_pcas)
             with open(pca_path, "rb") as handle:
                 pca_results = pkl.load(handle)
-            diff_n_pcas = pca_results.n_components - pca_path
+            diff_n_pcas = pca_results.n_components - n_pcas
             X = np.pad(X, [[0, 0], [0, diff_n_pcas]])
             return pca_results.inverse_transform(X)
         return X
@@ -740,7 +741,8 @@ class ClusteringExperiment(Experiment):
         coords: dict,
     ) -> xr.DataArray:
         centers = self.pca_inverse_transform(centers, n_pcas)
-        shape = [len(coord) for coord in coords.values]
+
+        shape = [len(coord) for coord in coords.values()]
         centers = xr.DataArray(centers.reshape(shape), coords=coords)
         if CIequal(self.weigh, "sqrtcos"):
             centers /= np.sqrt(degcos(da.lat))
@@ -797,9 +799,13 @@ class ClusteringExperiment(Experiment):
 
     def do_opp(
         self,
+        n_pcas: int = None,
         lag_max: int = 15,
-        coords: dict = None,  # if specified this function will return
+        return_realspace: bool = False, 
     ) -> Tuple[NDArray, NDArray] | Tuple[NDArray, xr.DataArray]:
+        """
+        I could GPU this fairly easily. Is it worth it tho ?
+        """
         X, da = self.prepare_for_clustering()
         X = self.pca_transform(X, n_pcas)
         X = X.reshape((X.shape[0], -1))
@@ -807,7 +813,7 @@ class ClusteringExperiment(Experiment):
         autocorrs = []
         for j in range(lag_max):
             autocorrs.append(
-                np.cov(X[j:], X(time=j).values[j:], rowvar=False)[n_pcas:, :n_pcas]
+                np.cov(X[j:], np.roll(X, j, axis=0)[j:], rowvar=False)[n_pcas:, :n_pcas]
             )
 
         autocorrs = np.asarray(autocorrs)
@@ -822,7 +828,7 @@ class ClusteringExperiment(Experiment):
         idx = np.argsort(eigenvals)[::-1]
         eigenvals = eigenvals[idx]
         OPPs = OPPs[idx]
-        if coords is None:
+        if not return_realspace:
             return eigenvals, OPPs
         coords = {
             "OPP": np.arange(OPPs.shape[0]),
@@ -849,31 +855,38 @@ class ClusteringExperiment(Experiment):
         output_path = self.path.joinpath(
             f"som_{nx}_{ny}_{self.midfix}_{self.season}_{self.weigh}{'_OPP' if OPP else ''}.npy"
         )
+        if train_kwargs is None:
+            train_kwargs = {}
 
         if output_path.is_file() and not return_centers:
             return output_path
         if OPP:
-            _, X = self.do_opp()
+            _, X = self.do_opp(n_pcas)
             da = self.open_da(self.midfix)
         else:
             X, da = self.prepare_for_clustering()
             X = self.pca_transform(X, n_pcas)
         if GPU:
-            reduced = cp.asarray(reduced)
+            try:
+                X = cp.asarray(X)
+            except NameError:
+                GPU = False
         if output_path.is_file():
-            net = SOMNet(nx, ny, reduced, load_file=output_path)
+            net = SOMNet(nx, ny, X, GPU=GPU, load_file=output_path.as_posix())
         else:
             net = SOMNet(  # TODO : implement own SOM class
-                nx, ny, reduced, PBC=True, GPU=GPU, **kwargs, output_path=output_path
+                nx, ny, X, PBC=True, GPU=GPU, **kwargs, output_path=output_path.as_posix()
             )
             net.train(**train_kwargs)
+            net.save_map(output_path.as_posix())
         if not return_centers:
             return net
-        if GPU:
-            centers = np.asarray([node.weights.get() for node in net.nodes_list])
-        else:
+        try:
             centers = np.asarray([node.weights for node in net.nodes_list])
-        centers = self.pca_inverse_transform(centers, n_pcas)
+        except TypeError: # ask for forgiveness not permission
+            centers = np.asarray([node.weights.get() for node in net.nodes_list])
+        logging.debug(centers)
+        logging.debug(centers.shape)
         coords = {
             "x": np.arange(nx),
             "y": np.arange(ny),
@@ -1146,6 +1159,23 @@ class ZooExperiment(object):
             )
         Zoo.to_netcdf(self.exp_u.path.joinpath("Zoo.nc"))
 
+def autocorrelation(path: Path, time_steps: int = 50) -> Path:
+    ds = xr.open_dataset(path)
+    name = path.parts[-1].split('.')[0]
+    parent = path.parent
+    autocorrs = {}
+    for i, varname in enumerate(ds):
+        if varname.split("_")[-1] == "climatology":
+            continue
+        autocorrs[varname] = ("lag", np.empty(time_steps))
+        for j in range(time_steps):
+            autocorrs[varname][1][j] = xr.corr(
+                ds[varname], ds[varname].shift(time=j)
+            ).values
+    autocorrsda = xr.Dataset(autocorrs, coords={"lag": np.arange(time_steps)})
+    opath = parent.joinpath(f"{name}_autocorrs.nc")
+    autocorrsda.to_netcdf(opath)
+    return opath # nice music bend
 
 # SOMperf stuff
 
@@ -1164,8 +1194,8 @@ def hexagonal_grid_distance(
         elif isinstance(input, list):
             ndim += 1
     i, j = np.atleast_1d(i), np.atleast_1d(j)
-    xi, yi = i % nx, i // nx
-    xj, yj = j % nx, j // nx
+    yi, xi = divmod(i, nx)
+    yj, xj = divmod(j, ny)
     dy = yj[None, :] - yi[:, None]
     dx = xj[None, :] - xi[:, None]
     corr = xj[None, :] // 2 - xi[:, None] // 2
