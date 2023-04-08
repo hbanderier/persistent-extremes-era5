@@ -4,7 +4,7 @@ import logging
 import platform
 import contourpy
 import numpy as np
-
+import time as timer
 try:
     import cupy as cp  # won't work on cpu nodes
 except ImportError:
@@ -40,7 +40,7 @@ from joblib import delayed, Parallel
 from sklearn.metrics.pairwise import euclidean_distances
 from cdo import Cdo
 
-logging.basicConfig(level=logging.WARNING)
+# logging.basicConfig(level=logging.DEBUG)
 pf = platform.platform()
 if pf.find("cray") >= 0:
     NODE = "DAINT"
@@ -226,6 +226,7 @@ def clusterplot(
     cbar_ylabel: str = None,
     clabels: Union[bool, list] = False,
     draw_labels: bool = False,
+    lambert_projection: bool = False,
     cmap: str = "seismic",
 ) -> Tuple[Figure, NDArray[Any, Object], Colorbar]:
     """Creates nice layout of plots with a common colorbar and color normalization
@@ -248,9 +249,12 @@ def clusterplot(
     """
     lon = to_plot[0]["lon"].values
     lat = to_plot[0]["lat"].values
-    projection = ccrs.LambertConformal(
-        central_longitude=np.mean(lon),
-    )
+    if lambert_projection:
+        projection = ccrs.LambertConformal(
+            central_longitude=np.mean(lon),
+        )
+    else:
+        projection = ccrs.PlateCarree()
     fig, axes = plt.subplots(
         nrow,
         ncol,
@@ -258,8 +262,9 @@ def clusterplot(
         subplot_kw={"projection": projection},
         constrained_layout=True,
     )
-    extent = [np.amin(lon), np.amax(lon), np.amin(lat), np.amax(lat)]
-    boundary = make_boundary_path(*extent)
+    if lambert_projection:
+        extent = [np.amin(lon), np.amax(lon), np.amin(lat), np.amax(lat)]
+        boundary = make_boundary_path(*extent)
     levels0 = np.delete(
         np.append(
             np.linspace(-cbar_extent, 0, nlevels), np.linspace(0, cbar_extent, nlevels)
@@ -290,7 +295,8 @@ def clusterplot(
             levels=levels0,
             colors="k",
         )
-        axes[i].set_boundary(boundary, transform=ccrs.PlateCarree())
+        if lambert_projection:
+            axes[i].set_boundary(boundary, transform=ccrs.PlateCarree())
         axes[i].add_feature(COASTLINE)
         axes[i].add_feature(BORDERS)
         if isinstance(clabels, bool) and clabels:
@@ -405,15 +411,12 @@ def kde(
     if return_x:
         return midpoints, kde
     return kde
-
-
+    
 def compute_anomaly(
-    ds: xr.DataArray,
+    da: xr.DataArray,
     return_clim: bool = False,
     smooth_kmax: int = None,
-) -> Union[
-    xr.DataArray, Tuple[xr.DataArray, xr.DataArray]
-]:  # https://github.com/pydata/xarray/issues/3575
+) -> xr.DataArray | Tuple[xr.DataArray, xr.DataArray]:  # https://github.com/pydata/xarray/issues/3575
     """computes daily anomalies extracted using a (possibly smoothed) climatology
 
     Args:
@@ -425,9 +428,9 @@ def compute_anomaly(
         anom (DataArray): _description_
         clim (DataArray, optional): climatology
     """
-    if len(ds["time"]) == 0:
-        return ds
-    gb = ds.groupby("time.dayofyear")
+    if len(da["time"]) == 0:
+        return da
+    gb = da.groupby("time.dayofyear")
     clim = gb.mean(dim="time")
     if smooth_kmax:
         ft = xrft.fft(clim, dim="dayofyear")
@@ -438,7 +441,7 @@ def compute_anomaly(
         ).real.assign_coords(dayofyear=clim.dayofyear)
     anom = (gb - clim).reset_coords("dayofyear", drop=True)
     if return_clim:
-        return anom, clim
+        return anom, clim # when Im not using map_blocks
     return anom
 
 
@@ -465,21 +468,6 @@ def figtitle(
 
 def CIequal(str1: str, str2: str) -> bool:
     return str1.casefold() == str2.casefold()
-
-
-def meandering(lines):
-    m = 0
-    for line in lines:
-        m += np.sum(np.sqrt(np.sum(np.diff(line, axis=0) ** 2, axis=1))) / 360
-    return m
-
-
-def one_ts(lon, lat, da):
-    m = []
-    gen = contourpy.contour_generator(x=lon, y=lat, z=da)
-    for lev in range(4900, 6205, 5):
-        m.append(meandering(gen.lines(lev)))
-    return np.amax(m)
 
 
 @dataclass(init=False)
@@ -551,53 +539,87 @@ class Experiment(object):
         return self.path.joinpath(joinpath)
 
     def open_da(self, suffix: str = "", **kwargs) -> xr.DataArray:
-        return xr.open_dataset(self.ofile(suffix), **kwargs)[self.smallname]
-
-    def detrend(self):
-        da = self.open_da(chunks={"time": -1, "lon": 20, "lat": 20})
-        if da.attrs["units"] == "m**2 s**-2":
+        da = xr.open_dataset(self.ofile(suffix), **kwargs)[self.smallname]
+        try:
+            da = da.rename({'longitude': 'lon', 'latitude': 'lat'})
+        except ValueError:
+            pass
+        try:
+            units = da.attrs['units']
+        except KeyError:
+            return da
+        if units == "m**2 s**-2":
             da /= co.g
             da.attrs["units"] = "m"
-        anomaly = xr.map_blocks(compute_anomaly, da, template=da).compute()
-        anomaly.to_netcdf(self.ofile("anomaly"))
-        anomaly = xrft.detrend(anomaly, "time", "linear").compute()
-        anomaly.to_netcdf(self.ofile("detrended"))
+        return da
+    
+    def detrend(self, n_workers: int = 8):
+        da = self.open_da(chunks={"time": -1, "lon": 20, "lat": 20})
+        anom, clim = compute_anomaly(da, return_clim=True)
+        anom = anom.compute(n_workers=n_workers)
+        anom.to_netcdf(self.ofile("anomaly"))
+        # clim = compute_climatology(da).compute(n_workers=n_workers)
+        clim.to_netcdf(self.ofile('climatology'))
+        anom = xrft.detrend(anom, "time", "linear").compute(n_workers=n_workers)
+        anom.to_netcdf(self.ofile("detrended"))
 
-    def smooth(self):
-        da = self.open_da()
-        resolution = da.lon[1] - da.lon[0]
+    def get_winsize(self, da: xr.DataArray) -> Tuple[float, float, float]:
+        resolution = (da.lon[1] - da.lon[0]).values.item()
         winsize = int(60 / resolution)
         halfwinsize = int(winsize / 2)
-        mode = "wrap" if self.region == "dailymean" else "edge"
-        da2 = (
-            da.pad(lon=halfwinsize, mode=mode)
-            .rolling(lon=winsize, center=True)
-            .mean()[:, :, halfwinsize:-halfwinsize]
-        )
-        da_fft = xrft.fft(da2, dim="time")
+        return resolution, winsize, halfwinsize
+    
+    def smooth(self):
+        if self.region == "dailymean":
+            da = self.open_da()
+            resolution, winsize, halfwinsize = self.get_winsize(da)
+            da = da.pad(lon=halfwinsize, mode='wrap')
+        else:
+            da = self.open_da('bigger')
+            resolution, winsize, halfwinsize = self.get_winsize(da)
+        da = da.rolling(lon=winsize, center=True).mean()[:, :, halfwinsize:-halfwinsize]
+        lon = da.lon
+        da_fft = xrft.fft(da, dim="time")
         da_fft[np.abs(da_fft.freq_time) > 1 / 10 / 24 / 3600] = 0
-        da3 = (
+        da = (
             xrft.ifft(da_fft, dim="freq_time", true_phase=True, true_amplitude=True)
             .real.assign_coords(time=da.time)
             .rename(self.smallname)
         )
-        da2.attrs["unit"] = "m/s"
-        da3.attrs["unit"] = "m/s"
-        da3["lon"] = da.lon
-        da3.to_netcdf(self.ofile("smooth"))
+        da.attrs["unit"] = "m/s"
+        da["lon"] = lon
+        da.to_netcdf(self.ofile("smooth"))
 
     def copy_content(self, cdo: Cdo, smooth: bool = False):
         if not self.path.is_dir():
             os.mkdir(self.path)
         ifile = self.ifile("")
         ofile = self.ofile("")
-        if not ofile.is_file():
+        if not ofile.is_file() and (not smooth and not self.region == 'dailymean'):
             cdo.sellonlatbox(
                 self.minlon,
                 self.maxlon,
                 self.minlat,
                 self.maxlat,
                 input=ifile.as_posix(),
+                output=ofile.as_posix(),
+            )
+        elif not ofile.is_file() and smooth:
+            ofile_bigger = self.ofile("bigger")
+            cdo.sellonlatbox(
+                self.minlon - 30,
+                self.maxlon + 30,
+                self.minlat,
+                self.maxlat,
+                input=ifile.as_posix(),
+                output=ofile_bigger.as_posix(),
+            )
+            cdo.sellonlatbox(
+                self.minlon,
+                self.maxlon,
+                self.minlat,
+                self.maxlat,
+                input=ofile_bigger.as_posix(),
                 output=ofile.as_posix(),
             )
         to_iterate = ["detrended", "anomaly"]
@@ -623,6 +645,13 @@ class Experiment(object):
             else:
                 self.smooth()
 
+    def to_absolute(
+        self,
+        da: xr.DataArray,
+    ) -> xr.DataArray: # TODO : deal with detrended anomalies, TODO : deal with other types of climatologies
+        clim = self.open_da('climatology')
+        return da.groupby('time.dayofyear') + clim
+            
 
 @dataclass(init=False)
 class ClusteringExperiment(Experiment):
@@ -731,7 +760,7 @@ class ClusteringExperiment(Experiment):
             diff_n_pcas = pca_results.n_components - n_pcas
             X = np.pad(X, [[0, 0], [0, diff_n_pcas]])
             return pca_results.inverse_transform(X)
-        return X
+        return X.reshape(X.shape[0], -1)
 
     def to_dataarray(
         self,
@@ -801,7 +830,7 @@ class ClusteringExperiment(Experiment):
         self,
         n_pcas: int = None,
         lag_max: int = 15,
-        return_realspace: bool = False, 
+        return_realspace: bool = False,
     ) -> Tuple[NDArray, NDArray] | Tuple[NDArray, xr.DataArray]:
         """
         I could GPU this fairly easily. Is it worth it tho ?
@@ -874,8 +903,14 @@ class ClusteringExperiment(Experiment):
         if output_path.is_file():
             net = SOMNet(nx, ny, X, GPU=GPU, load_file=output_path.as_posix())
         else:
-            net = SOMNet(  # TODO : implement own SOM class
-                nx, ny, X, PBC=True, GPU=GPU, **kwargs, output_path=output_path.as_posix()
+            net = SOMNet(  # TODO : implement own SOM class (forked simpsom)
+                nx,
+                ny,
+                X,
+                PBC=True,
+                GPU=GPU,
+                **kwargs,
+                output_path=self.path.as_posix(),
             )
             net.train(**train_kwargs)
             net.save_map(output_path.as_posix())
@@ -883,7 +918,7 @@ class ClusteringExperiment(Experiment):
             return net
         try:
             centers = np.asarray([node.weights for node in net.nodes_list])
-        except TypeError: # ask for forgiveness not permission
+        except TypeError:  # ask for forgiveness not permission
             centers = np.asarray([node.weights.get() for node in net.nodes_list])
         logging.debug(centers)
         logging.debug(centers.shape)
@@ -895,6 +930,21 @@ class ClusteringExperiment(Experiment):
         }
         centers = self.to_dataarray(centers, da, n_pcas, coords)
         return net, centers
+
+
+def meandering(lines):
+    m = 0
+    for line in lines: # typically few so a lopp is fine
+        m += np.sum(np.sqrt(np.sum(np.diff(line, axis=0) ** 2, axis=1))) / 360
+    return m
+
+
+def one_ts(lon, lat, da): # can't really vectorize this, have to parallelize
+    m = []
+    gen = contourpy.contour_generator(x=lon, y=lat, z=da)
+    for lev in range(4900, 6205, 5):
+        m.append(meandering(gen.lines(lev)))
+    return np.amax(m)
 
 
 @dataclass(init=False)
@@ -910,22 +960,27 @@ class ZooExperiment(object):
     ):
         self.dataset = dataset
         self.exp_u = Experiment(
-            dataset, "Wind", "Low", region, minlon, maxlon, minlat, maxlat
+            dataset, "Wind", "Low", region, 'u', minlon, maxlon, minlat, maxlat, True
         )
         self.exp_z = Experiment(
-            dataset, "Geopotential", "500", region, minlon, maxlon, minlat, maxlat
+            dataset, "Geopotential", "500", region, None, minlon, maxlon, minlat, maxlat
         )
         self.region = self.exp_u.region
         self.minlon = self.exp_u.minlon
         self.maxlon = self.exp_u.maxlon
         self.minlat = self.exp_u.minlat
         self.maxlat = self.exp_u.maxlat
-        self.da_wind = self.exp_u.open_da("smooth").squeeze()
-        self.da_wind_zonal_mean = (
-            xr.open_dataset(self.exp_u.ifile())[self.exp_u.smallname]
-            .sel(lon=self.da_wind.lon, lat=self.da_wind.lat)
-            .mean(dim="lon")
-        )
+        self.da_wind = self.exp_u.open_da("smooth").squeeze().load()
+        file_zonal_mean = self.exp_u.ofile('zonal_mean')
+        if file_zonal_mean.is_file():
+            self.da_wind_zonal_mean = xr.open_dataarray(file_zonal_mean)
+        else:
+            self.da_wind_zonal_mean = (
+                xr.open_dataset(self.exp_u.ifile())[self.exp_u.smallname]
+                .sel(lon=self.da_wind.lon, lat=self.da_wind.lat)
+                .mean(dim="lon")
+            )
+            self.da_wind_zonal_mean.to_netcdf(file_zonal_mean)
         self.da_z = self.exp_z.open_da().squeeze()
 
     def compute_JLI(self) -> Tuple[xr.DataArray, xr.DataArray]:
@@ -944,7 +999,7 @@ class ZooExperiment(object):
         ).rename("Lat")
         self.Lat.attrs["units"] = "degree_north"
         self.Int = (
-            da_Lat.isel(lat=self.LatI).reset_coords("lat", drop=True).rename("Int")
+            da_Lat.isel(lat=LatI).reset_coords("lat", drop=True).rename("Int")
         )
         self.Int.attrs["units"] = "m/s"
         return self.Lat, self.Int
@@ -1018,8 +1073,9 @@ class ZooExperiment(object):
                     > twodelta
                 )
                 # mask = where not to look for a maximum. The next step (forward for east or backward for west) needs to be within twodelta of the previous (otherlon)
+                da_wind_at_thislon = self.da_wind.isel(lon=thislon).values
                 here = np.ma.argmax(
-                    np.ma.array(self.da_wind.isel(lon=thislon).values, mask=mask),
+                    np.ma.array(da_wind_at_thislon, mask=mask),
                     axis=1,
                 )
                 self.trackedLats[:, thislon] = lats[here]
@@ -1108,25 +1164,37 @@ class ZooExperiment(object):
         self.Dep.attrs["units"] = "degree_north"
         return self.Dep
 
-    def compute_Mea(self, njobs: int = 32) -> xr.DataArray:
-        lon = self.da_wind.lon.values
-        lat = self.da_wind.lat.values
-        Mea = Parallel(n_jobs=njobs, backend="loky", max_nbytes=1e5)(
-            delayed(one_ts)(lon, lat, self.da_wind.sel(time=t).values)
-            for t in self.da_wind.time[:]
+    def compute_Mea(self, njobs: int = 8) -> xr.DataArray:
+        lon = self.da_z.lon.values
+        lat = self.da_z.lat.values
+        self.Mea = Parallel(
+            n_jobs=njobs, backend="loky", max_nbytes=1e5, verbose=0, batch_size=100
+        )(
+            delayed(one_ts)(lon, lat, self.da_z.sel(time=t).values)
+            for t in self.da_z.time[:]
         )
         self.Mea = xr.DataArray(
-            self.Mea, coords={"time": self.da_wind.time}, name="Mea"
+            self.Mea, coords={"time": self.da_z.time}, name="Mea"
         )
         return self.Mea
 
-    def compute_Zoo(self, detrend=False):
+    def get_Zoo_path(self) -> str:
+        return self.exp_u.path.joinpath("Zoo.nc")
+    
+    def compute_Zoo(self, detrend=False) -> str:
+        logging.debug('Lat')
         _ = self.compute_JLI()
+        logging.debug('Shar')
         _ = self.compute_Shar()
+        logging.debug('Tilt')
         _ = self.compute_Tilt()
+        logging.debug('Lon')
         _ = self.compute_Lon()
+        logging.debug('Lonew')
         _ = self.compute_Lonew()
+        logging.debug('Dep')
         _ = self.compute_Dep()
+        logging.debug('Mea')
         _ = self.compute_Mea()
 
         Zoo = xr.Dataset(
@@ -1143,25 +1211,25 @@ class ZooExperiment(object):
                 "Dep": self.Dep,
                 "Mea": self.Mea,
             }
-        ).dropna(
-            dim="time"
-        )  # dropna if time does not match between z and u (happens for NCEP)
+        ).dropna(dim="time")  # dropna if time does not match between z and u (happens for NCEP)
+        self.Zoopath = self.get_Zoo_path()
         if not detrend:
-            self.exp_u.path.joinpath("Zoo.nc")
-            Zoo.to_netcdf(self.exp_u.path.joinpath("Zoo.nc"))
-            return
+            Zoo.to_netcdf(self.Zoopath)
+            return self.Zoopath
         for key, value in Zoo.data_vars.items():
             Zoo[f"{key}_anomaly"], Zoo[f"{key}_climatology"] = compute_anomaly(
-                value, return_clim=True, smooth_kmax=3
+                value, return_clim=1, smooth_kmax=3
             )
             Zoo[f"{key}_detrended"] = xrft.detrend(
                 Zoo[f"{key}_anomaly"], dim="time", detrend_type="linear"
             )
-        Zoo.to_netcdf(self.exp_u.path.joinpath("Zoo.nc"))
+        Zoo.to_netcdf(self.Zoopath)
+        return self.Zoopath
+
 
 def autocorrelation(path: Path, time_steps: int = 50) -> Path:
     ds = xr.open_dataset(path)
-    name = path.parts[-1].split('.')[0]
+    name = path.parts[-1].split(".")[0]
     parent = path.parent
     autocorrs = {}
     for i, varname in enumerate(ds):
@@ -1175,7 +1243,8 @@ def autocorrelation(path: Path, time_steps: int = 50) -> Path:
     autocorrsda = xr.Dataset(autocorrs, coords={"lag": np.arange(time_steps)})
     opath = parent.joinpath(f"{name}_autocorrs.nc")
     autocorrsda.to_netcdf(opath)
-    return opath # nice music bend
+    return opath  # nice music bend
+
 
 # SOMperf stuff
 
