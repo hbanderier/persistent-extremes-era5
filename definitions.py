@@ -903,12 +903,13 @@ class ClusteringExperiment(Experiment):
         if output_path.is_file():
             net = SOMNet(nx, ny, X, GPU=GPU, load_file=output_path.as_posix())
         else:
-            net = SOMNet(  # TODO : implement own SOM class (forked simpsom)
+            net = SOMNet(
                 nx,
                 ny,
                 X,
                 PBC=True,
                 GPU=GPU,
+                init='pca',
                 **kwargs,
                 output_path=self.path.as_posix(),
             )
@@ -916,10 +917,7 @@ class ClusteringExperiment(Experiment):
             net.save_map(output_path.as_posix())
         if not return_centers:
             return net
-        try:
-            centers = np.asarray([node.weights for node in net.nodes_list])
-        except TypeError:  # ask for forgiveness not permission
-            centers = np.asarray([node.weights.get() for node in net.nodes_list])
+        centers = net._get(net.weights)
         logging.debug(centers)
         logging.debug(centers.shape)
         coords = {
@@ -1244,46 +1242,6 @@ def autocorrelation(path: Path, time_steps: int = 50) -> Path:
     opath = parent.joinpath(f"{name}_autocorrs.nc")
     autocorrsda.to_netcdf(opath)
     return opath  # nice music bend
-
-
-# SOMperf stuff
-
-
-def hexagonal_grid_distance(
-    i: Union[NDArray[Shape["*"], Int], int, list],
-    j: Union[NDArray[Shape["*"], Int], int, list],
-    nx: int,
-    ny: int,
-    PBC: bool = False,
-) -> Union[NDArray[Any, Int], int]:
-    ndim = 0
-    for input in [i, j]:
-        if isinstance(input, NDArray):
-            ndim += input.ndim
-        elif isinstance(input, list):
-            ndim += 1
-    i, j = np.atleast_1d(i), np.atleast_1d(j)
-    yi, xi = divmod(i, nx)
-    yj, xj = divmod(j, ny)
-    dy = yj[None, :] - yi[:, None]
-    dx = xj[None, :] - xi[:, None]
-    corr = xj[None, :] // 2 - xi[:, None] // 2
-    if PBC:
-        maskx = np.abs(dx) > (nx / 2)
-        masky = np.abs(dy) > (ny / 2)
-        dx[maskx] = -np.sign(dx[maskx]) * (nx - np.abs(dx[maskx]))
-        dy[masky] = -np.sign(dy[masky]) * (ny - np.abs(dy[masky]))
-        corr[maskx] = -np.sign(corr[maskx]) * (nx // 2 - np.abs(corr[maskx]))
-    dy = dy - corr
-    mask = np.sign(dx) == np.sign(dy)
-    all_dists = np.where(
-        mask, np.abs(dx + dy), np.amax([np.abs(dx), np.abs(dy)], axis=0)
-    )
-    if ndim == 0:
-        return all_dists[0, 0]
-    elif ndim == 1:
-        return all_dists.flatten()
-    return all_dists
 
 
 def smooth_hex(
