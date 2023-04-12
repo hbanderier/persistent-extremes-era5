@@ -831,7 +831,7 @@ class ClusteringExperiment(Experiment):
         n_pcas: int = None,
         lag_max: int = 15,
         return_realspace: bool = False,
-    ) -> Tuple[NDArray, NDArray] | Tuple[NDArray, xr.DataArray]:
+    ) -> Path | Tuple[NDArray, xr.DataArray, Path]:
         """
         I could GPU this fairly easily. Is it worth it tho ?
         """
@@ -839,33 +839,77 @@ class ClusteringExperiment(Experiment):
         X = self.pca_transform(X, n_pcas)
         X = X.reshape((X.shape[0], -1))
         n_pcas = X.shape[1]
-        autocorrs = []
-        for j in range(lag_max):
-            autocorrs.append(
-                np.cov(X[j:], np.roll(X, j, axis=0)[j:], rowvar=False)[n_pcas:, :n_pcas]
+        opp_path: Path = self.path.joinpath(
+            f"opp_{n_pcas}_{self.midfix}_{self.season}.pkl"
+        )
+        results = None
+        if not opp_path.is_file():
+            autocorrs = []
+            for j in range(lag_max):
+                autocorrs.append(
+                    np.cov(X[j:], np.roll(X, j, axis=0)[j:], rowvar=False)[n_pcas:, :n_pcas]
+                )
+
+            autocorrs = np.asarray(autocorrs)
+            M = autocorrs[0] + np.sum(
+                [autocorrs[i] + autocorrs[i].transpose() for i in range(1, lag_max)], axis=0
             )
 
-        autocorrs = np.asarray(autocorrs)
-        M = autocorrs[0] + np.sum(
-            [autocorrs[i] + autocorrs[i].transpose() for i in range(1, lag_max)], axis=0
-        )
-
-        invsqrtC0 = linalg.inv(linalg.sqrtm(autocorrs[0]))
-        symS = invsqrtC0.T @ M @ invsqrtC0
-        eigenvals, eigenvecs = linalg.eigh(symS)
-        OPPs = autocorrs[0] @ (invsqrtC0 @ eigenvecs.T)
-        idx = np.argsort(eigenvals)[::-1]
-        eigenvals = eigenvals[idx]
-        OPPs = OPPs[idx]
+            invsqrtC0 = linalg.inv(linalg.sqrtm(autocorrs[0]))
+            symS = invsqrtC0.T @ M @ invsqrtC0
+            eigenvals, eigenvecs = linalg.eigh(symS)
+            OPPs = autocorrs[0] @ (invsqrtC0 @ eigenvecs.T)
+            idx = np.argsort(eigenvals)[::-1]
+            eigenvals = eigenvals[idx]
+            OPPs = OPPs[idx]
+            results = {
+                'eigenvals': eigenvals,
+                'OPPs': OPPs,
+            }
+            with open(opp_path, "wb") as handle:
+                pkl.dump(results, handle)
         if not return_realspace:
-            return eigenvals, OPPs
+            return opp_path
+        if results is None:
+            with open(opp_path, "rb") as handle:
+                results = pkl.load(handle)
+                OPPs = results['OPPs']
         coords = {
             "OPP": np.arange(OPPs.shape[0]),
             "lat": da.lat.values,
             "lon": da.lon.values,
         }
         OPPs = self.to_dataarray(OPPs, da, n_pcas, coords)
-        return eigenvals, OPPs
+        return eigenvals, OPPs, opp_path
+    
+    def opp_transform(
+        self,
+        X: NDArray[Shape["*, *"], Float],
+        n_opps: int,
+    ) -> NDArray[Shape["*, *"], Float]:
+        opp_path = self.do_opp(n_opps)
+        with open(opp_path, "rb") as handle:
+            opp_results = pkl.load(handle)
+        if not X.shape[1] == n_opps:
+            X = self.pca_transform(X, n_opps)
+        OPPs = opp_results['OPPs']
+        X = np.linalg.inv(OPPs) @ X #TODO FIX THIS
+        return X
+
+    def opp_inverse_transform(
+        self,
+        X: NDArray[Shape["*, *"], Float],
+        n_opps: int = None,
+        to_realspace = None,
+    ) -> NDArray[Shape["*, *"], Float]:
+        opp_path = self.do_opp(n_opps)
+        with open(opp_path, "rb") as handle:
+            opp_results = pkl.load(handle)
+        OPPs = opp_results['OPPs']
+        X = np.linalg.inv(OPPs) @ X #TODO FIX THIS
+        if to_realspace:
+            return self.inverse_transform(X)
+        return X
 
     def do_som(
         self,
@@ -890,8 +934,10 @@ class ClusteringExperiment(Experiment):
         if output_path.is_file() and not return_centers:
             return output_path
         if OPP:
-            _, X = self.do_opp(n_pcas)
-            da = self.open_da(self.midfix)
+            X, da = self.prepare_for_clustering()
+            X = self.pca_transform(X, n_pcas)
+            _, OPPs = self.do_opp(n_pcas)
+            X = self.opp_transform()
         else:
             X, da = self.prepare_for_clustering()
             X = self.pca_transform(X, n_pcas)
@@ -1166,7 +1212,7 @@ class ZooExperiment(object):
         lon = self.da_z.lon.values
         lat = self.da_z.lat.values
         self.Mea = Parallel(
-            n_jobs=njobs, backend="loky", max_nbytes=1e5, verbose=0, batch_size=100
+            n_jobs=njobs, backend="loky", max_nbytes=1e6, verbose=0, batch_size=50
         )(
             delayed(one_ts)(lon, lat, self.da_z.sel(time=t).values)
             for t in self.da_z.time[:]
@@ -1241,14 +1287,35 @@ def autocorrelation(path: Path, time_steps: int = 50) -> Path:
     autocorrsda = xr.Dataset(autocorrs, coords={"lag": np.arange(time_steps)})
     opath = parent.joinpath(f"{name}_autocorrs.nc")
     autocorrsda.to_netcdf(opath)
-    return opath  # nice music bend
+    return opath  # a great swedish metal bEnd
 
-
-def smooth_hex(
-    quantity: NDArray[Shape["*"], Float],
-    precomputed_distances: NDArray[Shape["*, *"], Int],
-    k_nn: int = 1,
-) -> NDArray[Shape["*"], Float]:
-    return np.sum(
-        (quantity[None, :] * (precomputed_distances <= k_nn).astype(int)), axis=1
-    ) / np.sum(precomputed_distances[0, :] <= k_nn)
+def Hurst_exponent(path: Path, subdivs: int = 11) -> Path:
+    ds = xr.open_dataset(path)
+    subdivs = [2**n for n in range(11)]
+    lengths = [len(ds.time) // n for n in subdivs]
+    all_lengths = np.repeat(lengths, subdivs)
+    N_chunks = np.sum(subdivs)
+    Hurst = {}
+    for i, varname in enumerate(ds.data_vars):
+        adjusted_ranges = []
+        for n_chunks, n in zip(subdivs, lengths):
+            start = 0
+            aranges = []
+            for k in range(n_chunks):
+                end = start + n
+                series = ds[varname].isel(time=np.arange(start, end)).values
+                mean = np.mean(series)
+                std = np.std(series)
+                series -= mean
+                series = np.cumsum(series)
+                raw_range = series.max() - series.min()
+                aranges.append(raw_range / std)
+            adjusted_ranges.append(np.mean(aranges))
+        coeffs = np.polyfit(np.log(lengths), np.log(adjusted_ranges), deg=1)
+        Hurst[varname] = [coeffs[0], np.exp(coeffs[1])]
+    parent = path.parent
+    name = path.parts[-1].split(".")[0]
+    opath = parent.joinpath(f"{name}_Hurst.pkl")
+    with open(opath, "wb") as handle:
+        pkl.dump(Hurst, handle)
+    return opath
