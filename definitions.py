@@ -13,12 +13,8 @@ import pandas as pd
 import xarray as xr
 import xrft
 import pickle as pkl
-import scipy.constants as co
 import matplotlib as mpl
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-import matplotlib.path as mpath
-import matplotlib.ticker as mticker
+from matplotlib import pyplt as plt, cm, path as mpath, ticker as mticker
 from matplotlib.colors import BoundaryNorm
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
@@ -28,7 +24,7 @@ import cartopy.crs as ccrs
 import cartopy.feature as feat
 from simpsom import SOMNet
 from scipy.stats import gaussian_kde, norm as normal_dist
-from scipy import linalg
+from scipy import linalg, constants as co
 from typing import Union, Any, Tuple, Optional
 from nptyping import NDArray, Object, Shape, Int, Float
 from dataclasses import dataclass
@@ -710,8 +706,25 @@ class ClusteringExperiment(Experiment):
             da *= degcos(da.lat)
         X = da.values.reshape(len(da.time), -1)
         return X, da
+    
+    def to_dataarray(
+        self,
+        centers: NDArray[Shape["*, *"], Float],
+        da: xr.DataArray,
+        n_pcas: Optional[int],
+        coords: dict,
+    ) -> xr.DataArray:
+        centers = self.pca_inverse_transform(centers, n_pcas)
 
-    def do_pca(self, n_pcas: int, force: bool = False) -> str:
+        shape = [len(coord) for coord in coords.values()]
+        centers = xr.DataArray(centers.reshape(shape), coords=coords)
+        if CIequal(self.weigh, "sqrtcos"):
+            centers /= np.sqrt(degcos(da.lat))
+        elif CIequal(self.weigh, "cos"):
+            centers /= degcos(da.lat)
+        return centers
+
+    def compute_pcas(self, n_pcas: int, force: bool = False) -> str:
         glob_string = f"pca_*_{self.midfix}_{self.season}.pkl"
         logging.debug(glob_string)
         potential_paths = [
@@ -742,7 +755,7 @@ class ClusteringExperiment(Experiment):
         n_pcas: int = None,
     ) -> NDArray[Shape["*, *"], Float]:
         if n_pcas is not None:
-            pca_path = self.do_pca(n_pcas)
+            pca_path = self.compute_pcas(n_pcas)
             with open(pca_path, "rb") as handle:
                 pca_results = pkl.load(handle)
             return pca_results.transform(X)[:, :n_pcas]
@@ -754,7 +767,7 @@ class ClusteringExperiment(Experiment):
         n_pcas: int = None,
     ) -> NDArray[Shape["*, *"], Float]:
         if n_pcas is not None:
-            pca_path = self.do_pca(n_pcas)
+            pca_path = self.compute_pcas(n_pcas)
             with open(pca_path, "rb") as handle:
                 pca_results = pkl.load(handle)
             diff_n_pcas = pca_results.n_components - n_pcas
@@ -762,71 +775,7 @@ class ClusteringExperiment(Experiment):
             return pca_results.inverse_transform(X)
         return X.reshape(X.shape[0], -1)
 
-    def to_dataarray(
-        self,
-        centers: NDArray[Shape["*, *"], Float],
-        da: xr.DataArray,
-        n_pcas: Optional[int],
-        coords: dict,
-    ) -> xr.DataArray:
-        centers = self.pca_inverse_transform(centers, n_pcas)
-
-        shape = [len(coord) for coord in coords.values()]
-        centers = xr.DataArray(centers.reshape(shape), coords=coords)
-        if CIequal(self.weigh, "sqrtcos"):
-            centers /= np.sqrt(degcos(da.lat))
-        elif CIequal(self.weigh, "cos"):
-            centers /= degcos(da.lat)
-        return centers
-
-    def cluster(
-        self,
-        n_clu: int,
-        n_pcas: int = None,
-        kind: str = "kmeans",
-        return_centers: bool = True,
-    ) -> str | Tuple[xr.DataArray, str]:
-        X, da = self.prepare_for_clustering()
-        X = self.pca_transform(X, n_pcas)
-        if CIequal(kind, "kmeans"):
-            results = KMeans(n_clu, n_init="auto")
-            suffix = ""
-        elif CIequal(kind, "kmedoids"):
-            results = KMedoids(n_clu)
-            suffix = "med"
-        else:
-            raise NotImplementedError(
-                f"{kind} clustering not implemented. Options are kmeans and kmedoids"
-            )
-        picklepath = self.path.joinpath(
-            f"k{suffix}_{n_clu}_{self.midfix}_{self.season}_{self.weigh}.pkl"
-        )
-        if picklepath.is_file():
-            with open(picklepath, "rb") as handle:
-                results = pkl.load(handle)
-        else:
-            results = results.fit(X)
-            with open(picklepath, "wb") as handle:
-                pkl.dump(results, handle)
-        if not return_centers:
-            return picklepath
-        if isinstance(results, KMeans):
-            centers = results.cluster_centers_
-            coords = {
-                "cluster": np.arange(centers.shape[0]),
-                "lat": da.lat.values,
-                "lon": da.lon.values,
-            }
-            centers = self.to_dataarray(da, n_pcas, centers, coords)
-        elif isinstance(results, KMedoids):
-            centers = (
-                da.isel(time=results.medoids)
-                .rename({"time": "cluster"})
-                .assign_coords({"cluster": np.arange(len(results.medoids))})
-            )
-        return centers, picklepath
-
-    def do_opp(
+    def compute_opps(
         self,
         n_pcas: int = None,
         lag_max: int = 15,
@@ -887,31 +836,78 @@ class ClusteringExperiment(Experiment):
         X: NDArray[Shape["*, *"], Float],
         n_opps: int,
     ) -> NDArray[Shape["*, *"], Float]:
-        opp_path = self.do_opp(n_opps)
+        opp_path = self.compute_opps(n_opps)
         with open(opp_path, "rb") as handle:
             opp_results = pkl.load(handle)
         if not X.shape[1] == n_opps:
             X = self.pca_transform(X, n_opps)
         OPPs = opp_results['OPPs']
-        X = np.linalg.inv(OPPs) @ X #TODO FIX THIS
+        X = X @ OPPs
         return X
 
     def opp_inverse_transform(
         self,
         X: NDArray[Shape["*, *"], Float],
         n_opps: int = None,
-        to_realspace = None,
+        to_realspace = False,
     ) -> NDArray[Shape["*, *"], Float]:
-        opp_path = self.do_opp(n_opps)
+        opp_path = self.compute_opps(n_opps)
         with open(opp_path, "rb") as handle:
             opp_results = pkl.load(handle)
         OPPs = opp_results['OPPs']
-        X = np.linalg.inv(OPPs) @ X #TODO FIX THIS
+        X = X @ OPPs.T
         if to_realspace:
-            return self.inverse_transform(X)
+            return self.pca_inverse_transform(X)
         return X
+    
+    def cluster(
+        self,
+        n_clu: int,
+        n_pcas: int = None,
+        kind: str = "kmeans",
+        return_centers: bool = True,
+    ) -> str | Tuple[xr.DataArray, str]:
+        X, da = self.prepare_for_clustering()
+        X = self.pca_transform(X, n_pcas)
+        if CIequal(kind, "kmeans"):
+            results = KMeans(n_clu, n_init="auto")
+            suffix = ""
+        elif CIequal(kind, "kmedoids"):
+            results = KMedoids(n_clu)
+            suffix = "med"
+        else:
+            raise NotImplementedError(
+                f"{kind} clustering not implemented. Options are kmeans and kmedoids"
+            )
+        picklepath = self.path.joinpath(
+            f"k{suffix}_{n_clu}_{self.midfix}_{self.season}_{self.weigh}.pkl"
+        )
+        if picklepath.is_file():
+            with open(picklepath, "rb") as handle:
+                results = pkl.load(handle)
+        else:
+            results = results.fit(X)
+            with open(picklepath, "wb") as handle:
+                pkl.dump(results, handle)
+        if not return_centers:
+            return picklepath
+        if isinstance(results, KMeans):
+            centers = results.cluster_centers_
+            coords = {
+                "cluster": np.arange(centers.shape[0]),
+                "lat": da.lat.values,
+                "lon": da.lon.values,
+            }
+            centers = self.to_dataarray(da, n_pcas, centers, coords)
+        elif isinstance(results, KMedoids):
+            centers = (
+                da.isel(time=results.medoids)
+                .rename({"time": "cluster"})
+                .assign_coords({"cluster": np.arange(len(results.medoids))})
+            )
+        return centers, picklepath
 
-    def do_som(
+    def compute_som(
         self,
         nx: int,
         ny: int,
@@ -935,12 +931,10 @@ class ClusteringExperiment(Experiment):
             return output_path
         if OPP:
             X, da = self.prepare_for_clustering()
-            X = self.pca_transform(X, n_pcas)
-            _, OPPs = self.do_opp(n_pcas)
-            X = self.opp_transform()
+            X = self.opp_transform(X, n_opps=n_pcas)
         else:
             X, da = self.prepare_for_clustering()
-            X = self.pca_transform(X, n_pcas)
+            X = self.pca_transform(X, n_pcas=n_pcas)
         if GPU:
             try:
                 X = cp.asarray(X)
@@ -972,6 +966,8 @@ class ClusteringExperiment(Experiment):
             "lat": da.lat.values,
             "lon": da.lon.values,
         }
+        if OPP:
+            centers = self.opp_inverse_transform(centers, n_opps=n_pcas)
         centers = self.to_dataarray(centers, da, n_pcas, coords)
         return net, centers
 
