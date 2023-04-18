@@ -5,6 +5,7 @@ import platform
 import contourpy
 import numpy as np
 import time as timer
+
 try:
     import cupy as cp  # won't work on cpu nodes
 except ImportError:
@@ -14,7 +15,7 @@ import xarray as xr
 import xrft
 import pickle as pkl
 import matplotlib as mpl
-from matplotlib import pyplt as plt, cm, path as mpath, ticker as mticker
+from matplotlib import pyplot as plt, cm, path as mpath, ticker as mticker
 from matplotlib.colors import BoundaryNorm
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
@@ -175,6 +176,17 @@ BORDERS = feat.NaturalEarthFeature(
 SMALLNAME = {"Geopotential": "z", "Wind": "s", "Temperature": "t"}  # Wind speed
 
 
+def load_pickle(filename: str | Path) -> Any:
+    with open(filename, "rb") as handle:
+        to_ret = pkl.load(handle)
+    return to_ret
+
+
+def save_pickle(to_save: Any, filename: str | Path) -> None:
+    with open(filename, "wb") as handle:
+        pkl.dump(to_save, handle)
+
+
 def make_boundary_path(
     minlon: float, maxlon: float, minlat: float, maxlat: float, n: int = 50
 ) -> mpath.Path:
@@ -224,6 +236,7 @@ def clusterplot(
     draw_labels: bool = False,
     lambert_projection: bool = False,
     cmap: str = "seismic",
+    contours: bool = True,
 ) -> Tuple[Figure, NDArray[Any, Object], Colorbar]:
     """Creates nice layout of plots with a common colorbar and color normalization
 
@@ -271,7 +284,7 @@ def clusterplot(
     cmap = mpl.colormaps[cmap]
     norm = BoundaryNorm(levels, cmap.N, extend="both")
     im = cm.ScalarMappable(norm=norm, cmap=cmap)
-    axes = axes.flatten()
+    axes = np.atleast_1d(axes).flatten()
     for i in range(len(to_plot)):
         axes[i].contourf(
             lon,
@@ -283,21 +296,22 @@ def clusterplot(
             norm=norm,
             extend="both",
         )
-        cs = axes[i].contour(
-            lon,
-            lat,
-            to_plot[i],
-            transform=ccrs.PlateCarree(),
-            levels=levels0,
-            colors="k",
-        )
+        if contours:
+            cs = axes[i].contour(
+                lon,
+                lat,
+                to_plot[i],
+                transform=ccrs.PlateCarree(),
+                levels=levels0,
+                colors="k",
+            )
         if lambert_projection:
             axes[i].set_boundary(boundary, transform=ccrs.PlateCarree())
         axes[i].add_feature(COASTLINE)
         axes[i].add_feature(BORDERS)
-        if isinstance(clabels, bool) and clabels:
+        if isinstance(clabels, bool) and clabels and contours:
             axes[i].clabel(cs)
-        elif isinstance(clabels, list):
+        elif isinstance(clabels, list) and contours:
             axes[i].clabel(cs, levels=clabels)
         if draw_labels:
             gl = axes[i].gridlines(
@@ -407,12 +421,15 @@ def kde(
     if return_x:
         return midpoints, kde
     return kde
-    
+
+
 def compute_anomaly(
     da: xr.DataArray,
     return_clim: bool = False,
     smooth_kmax: int = None,
-) -> xr.DataArray | Tuple[xr.DataArray, xr.DataArray]:  # https://github.com/pydata/xarray/issues/3575
+) -> (
+    xr.DataArray | Tuple[xr.DataArray, xr.DataArray]
+):  # https://github.com/pydata/xarray/issues/3575
     """computes daily anomalies extracted using a (possibly smoothed) climatology
 
     Args:
@@ -437,7 +454,7 @@ def compute_anomaly(
         ).real.assign_coords(dayofyear=clim.dayofyear)
     anom = (gb - clim).reset_coords("dayofyear", drop=True)
     if return_clim:
-        return anom, clim # when Im not using map_blocks
+        return anom, clim  # when Im not using map_blocks
     return anom
 
 
@@ -534,28 +551,41 @@ class Experiment(object):
         joinpath = f"{self.smallname}{underscore}{suffix}.nc"
         return self.path.joinpath(joinpath)
 
-    def open_da(self, suffix: str = "", **kwargs) -> xr.DataArray:
+    def open_da(
+        self, suffix: str = "", season: list | str | None = None, **kwargs
+    ) -> xr.DataArray:
         da = xr.open_dataset(self.ofile(suffix), **kwargs)[self.smallname]
         try:
-            da = da.rename({'longitude': 'lon', 'latitude': 'lat'})
+            da = da.rename({"longitude": "lon", "latitude": "lat"})
         except ValueError:
             pass
+        if isinstance(season, list):
+            da.isel(time=np.isin(da.time.dt.month, season))
+        elif isinstance(season, str):
+            if season in ["DJF", "MAM", "JJA", "SON"]:
+                da = da.isel(time=da.time.dt.season == season)
+            else:
+                raise ValueError(
+                    f"Wrong season specifier : {season} is not a valid xarray season"
+                )
+        if (da.time[1] - da.time[0]).values > np.timedelta64(6, "h"):
+            da = da.assign_coords({"time": da.time.values.astype("datetime64[D]")})
         try:
-            units = da.attrs['units']
+            units = da.attrs["units"]
         except KeyError:
             return da
         if units == "m**2 s**-2":
             da /= co.g
             da.attrs["units"] = "m"
         return da
-    
+
     def detrend(self, n_workers: int = 8):
         da = self.open_da(chunks={"time": -1, "lon": 20, "lat": 20})
         anom, clim = compute_anomaly(da, return_clim=True)
         anom = anom.compute(n_workers=n_workers)
         anom.to_netcdf(self.ofile("anomaly"))
         # clim = compute_climatology(da).compute(n_workers=n_workers)
-        clim.to_netcdf(self.ofile('climatology'))
+        clim.to_netcdf(self.ofile("climatology"))
         anom = xrft.detrend(anom, "time", "linear").compute(n_workers=n_workers)
         anom.to_netcdf(self.ofile("detrended"))
 
@@ -564,14 +594,14 @@ class Experiment(object):
         winsize = int(60 / resolution)
         halfwinsize = int(winsize / 2)
         return resolution, winsize, halfwinsize
-    
+
     def smooth(self):
         if self.region == "dailymean":
             da = self.open_da()
             resolution, winsize, halfwinsize = self.get_winsize(da)
-            da = da.pad(lon=halfwinsize, mode='wrap')
+            da = da.pad(lon=halfwinsize, mode="wrap")
         else:
-            da = self.open_da('bigger')
+            da = self.open_da("bigger")
             resolution, winsize, halfwinsize = self.get_winsize(da)
         da = da.rolling(lon=winsize, center=True).mean()[:, :, halfwinsize:-halfwinsize]
         lon = da.lon
@@ -591,7 +621,7 @@ class Experiment(object):
             os.mkdir(self.path)
         ifile = self.ifile("")
         ofile = self.ofile("")
-        if not ofile.is_file() and (not smooth and not self.region == 'dailymean'):
+        if not ofile.is_file() and (not smooth and not self.region == "dailymean"):
             cdo.sellonlatbox(
                 self.minlon,
                 self.maxlon,
@@ -644,10 +674,12 @@ class Experiment(object):
     def to_absolute(
         self,
         da: xr.DataArray,
-    ) -> xr.DataArray: # TODO : deal with detrended anomalies, TODO : deal with other types of climatologies
-        clim = self.open_da('climatology')
-        return da.groupby('time.dayofyear') + clim
-            
+    ) -> (
+        xr.DataArray
+    ):  # TODO : deal with detrended anomalies, TODO : deal with other types of climatologies
+        clim = self.open_da("climatology")
+        return da.groupby("time.dayofyear") + clim
+
 
 @dataclass(init=False)
 class ClusteringExperiment(Experiment):
@@ -690,23 +722,14 @@ class ClusteringExperiment(Experiment):
         self.weigh = weigh
 
     def prepare_for_clustering(self) -> Tuple[NDArray, xr.DataArray]:
-        da = self.open_da(self.midfix)
-        if isinstance(self.season, list):
-            da.isel(time=np.isin(da.time.dt.month, self.season))
-        elif isinstance(self.season, str):
-            if self.season in ["DJF", "MAM", "JJA", "SON"]:
-                da = da.isel(time=da.time.dt.season == self.season)
-            else:
-                raise ValueError(
-                    f"Wrong season specifier : {self.season} is not a valid xarray season"
-                )
+        da = self.open_da(self.midfix, self.season)
         if CIequal(self.weigh, "sqrtcos"):
             da *= np.sqrt(degcos(da.lat))
         elif CIequal(self.weigh, "cos"):
             da *= degcos(da.lat)
         X = da.values.reshape(len(da.time), -1)
         return X, da
-    
+
     def to_dataarray(
         self,
         centers: NDArray[Shape["*, *"], Float],
@@ -796,12 +819,15 @@ class ClusteringExperiment(Experiment):
             autocorrs = []
             for j in range(lag_max):
                 autocorrs.append(
-                    np.cov(X[j:], np.roll(X, j, axis=0)[j:], rowvar=False)[n_pcas:, :n_pcas]
+                    np.cov(X[j:], np.roll(X, j, axis=0)[j:], rowvar=False)[
+                        n_pcas:, :n_pcas
+                    ]
                 )
 
             autocorrs = np.asarray(autocorrs)
             M = autocorrs[0] + np.sum(
-                [autocorrs[i] + autocorrs[i].transpose() for i in range(1, lag_max)], axis=0
+                [autocorrs[i] + autocorrs[i].transpose() for i in range(1, lag_max)],
+                axis=0,
             )
 
             invsqrtC0 = linalg.inv(linalg.sqrtm(autocorrs[0]))
@@ -812,8 +838,8 @@ class ClusteringExperiment(Experiment):
             eigenvals = eigenvals[idx]
             OPPs = OPPs[idx]
             results = {
-                'eigenvals': eigenvals,
-                'OPPs': OPPs,
+                "eigenvals": eigenvals,
+                "OPPs": OPPs,
             }
             with open(opp_path, "wb") as handle:
                 pkl.dump(results, handle)
@@ -822,7 +848,8 @@ class ClusteringExperiment(Experiment):
         if results is None:
             with open(opp_path, "rb") as handle:
                 results = pkl.load(handle)
-                OPPs = results['OPPs']
+                OPPs = results["OPPs"]
+                eigenvals = results["eigenvals"]
         coords = {
             "OPP": np.arange(OPPs.shape[0]),
             "lat": da.lat.values,
@@ -830,7 +857,7 @@ class ClusteringExperiment(Experiment):
         }
         OPPs = self.to_dataarray(OPPs, da, n_pcas, coords)
         return eigenvals, OPPs, opp_path
-    
+
     def opp_transform(
         self,
         X: NDArray[Shape["*, *"], Float],
@@ -841,25 +868,25 @@ class ClusteringExperiment(Experiment):
             opp_results = pkl.load(handle)
         if not X.shape[1] == n_opps:
             X = self.pca_transform(X, n_opps)
-        OPPs = opp_results['OPPs']
-        X = X @ OPPs
+        OPPs = opp_results["OPPs"]
+        X = X @ OPPs.T
         return X
 
     def opp_inverse_transform(
         self,
         X: NDArray[Shape["*, *"], Float],
         n_opps: int = None,
-        to_realspace = False,
+        to_realspace=False,
     ) -> NDArray[Shape["*, *"], Float]:
         opp_path = self.compute_opps(n_opps)
         with open(opp_path, "rb") as handle:
             opp_results = pkl.load(handle)
-        OPPs = opp_results['OPPs']
-        X = X @ OPPs.T
+        OPPs = opp_results["OPPs"]
+        X = X @ OPPs
         if to_realspace:
             return self.pca_inverse_transform(X)
         return X
-    
+
     def cluster(
         self,
         n_clu: int,
@@ -941,7 +968,7 @@ class ClusteringExperiment(Experiment):
             except NameError:
                 GPU = False
         if output_path.is_file():
-            net = SOMNet(nx, ny, X, GPU=GPU, load_file=output_path.as_posix())
+            net = SOMNet(nx, ny, X, GPU=GPU, PBC=True, load_file=output_path.as_posix())
         else:
             net = SOMNet(
                 nx,
@@ -949,7 +976,7 @@ class ClusteringExperiment(Experiment):
                 X,
                 PBC=True,
                 GPU=GPU,
-                init='pca',
+                init="pca",
                 **kwargs,
                 output_path=self.path.as_posix(),
             )
@@ -974,12 +1001,12 @@ class ClusteringExperiment(Experiment):
 
 def meandering(lines):
     m = 0
-    for line in lines: # typically few so a lopp is fine
+    for line in lines:  # typically few so a lopp is fine
         m += np.sum(np.sqrt(np.sum(np.diff(line, axis=0) ** 2, axis=1))) / 360
     return m
 
 
-def one_ts(lon, lat, da): # can't really vectorize this, have to parallelize
+def one_ts(lon, lat, da):  # can't really vectorize this, have to parallelize
     m = []
     gen = contourpy.contour_generator(x=lon, y=lat, z=da)
     for lev in range(4900, 6205, 5):
@@ -1000,7 +1027,7 @@ class ZooExperiment(object):
     ):
         self.dataset = dataset
         self.exp_u = Experiment(
-            dataset, "Wind", "Low", region, 'u', minlon, maxlon, minlat, maxlat, True
+            dataset, "Wind", "Low", region, "u", minlon, maxlon, minlat, maxlat, True
         )
         self.exp_z = Experiment(
             dataset, "Geopotential", "500", region, None, minlon, maxlon, minlat, maxlat
@@ -1011,7 +1038,7 @@ class ZooExperiment(object):
         self.minlat = self.exp_u.minlat
         self.maxlat = self.exp_u.maxlat
         self.da_wind = self.exp_u.open_da("smooth").squeeze().load()
-        file_zonal_mean = self.exp_u.ofile('zonal_mean')
+        file_zonal_mean = self.exp_u.ofile("zonal_mean")
         if file_zonal_mean.is_file():
             self.da_wind_zonal_mean = xr.open_dataarray(file_zonal_mean)
         else:
@@ -1038,9 +1065,7 @@ class ZooExperiment(object):
             da_Lat.lat[LatI.values.flatten()].values, coords={"time": da_Lat.time}
         ).rename("Lat")
         self.Lat.attrs["units"] = "degree_north"
-        self.Int = (
-            da_Lat.isel(lat=LatI).reset_coords("lat", drop=True).rename("Int")
-        )
+        self.Int = da_Lat.isel(lat=LatI).reset_coords("lat", drop=True).rename("Int")
         self.Int.attrs["units"] = "m/s"
         return self.Lat, self.Int
 
@@ -1213,28 +1238,26 @@ class ZooExperiment(object):
             delayed(one_ts)(lon, lat, self.da_z.sel(time=t).values)
             for t in self.da_z.time[:]
         )
-        self.Mea = xr.DataArray(
-            self.Mea, coords={"time": self.da_z.time}, name="Mea"
-        )
+        self.Mea = xr.DataArray(self.Mea, coords={"time": self.da_z.time}, name="Mea")
         return self.Mea
 
     def get_Zoo_path(self) -> str:
         return self.exp_u.path.joinpath("Zoo.nc")
-    
+
     def compute_Zoo(self, detrend=False) -> str:
-        logging.debug('Lat')
+        logging.debug("Lat")
         _ = self.compute_JLI()
-        logging.debug('Shar')
+        logging.debug("Shar")
         _ = self.compute_Shar()
-        logging.debug('Tilt')
+        logging.debug("Tilt")
         _ = self.compute_Tilt()
-        logging.debug('Lon')
+        logging.debug("Lon")
         _ = self.compute_Lon()
-        logging.debug('Lonew')
+        logging.debug("Lonew")
         _ = self.compute_Lonew()
-        logging.debug('Dep')
+        logging.debug("Dep")
         _ = self.compute_Dep()
-        logging.debug('Mea')
+        logging.debug("Mea")
         _ = self.compute_Mea()
 
         Zoo = xr.Dataset(
@@ -1251,7 +1274,9 @@ class ZooExperiment(object):
                 "Dep": self.Dep,
                 "Mea": self.Mea,
             }
-        ).dropna(dim="time")  # dropna if time does not match between z and u (happens for NCEP)
+        ).dropna(
+            dim="time"
+        )  # dropna if time does not match between z and u (happens for NCEP)
         self.Zoopath = self.get_Zoo_path()
         if not detrend:
             Zoo.to_netcdf(self.Zoopath)
@@ -1284,6 +1309,7 @@ def autocorrelation(path: Path, time_steps: int = 50) -> Path:
     opath = parent.joinpath(f"{name}_autocorrs.nc")
     autocorrsda.to_netcdf(opath)
     return opath  # a great swedish metal bEnd
+
 
 def Hurst_exponent(path: Path, subdivs: int = 11) -> Path:
     ds = xr.open_dataset(path)
