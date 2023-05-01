@@ -6,3 +6,5 @@ Figures
 *.npy
 *.json
 *.out
+*.png
+*.pdf

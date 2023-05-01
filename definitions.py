@@ -1,41 +1,50 @@
-import os
 import glob
 import logging
+import os
 import platform
+import time as timer
+
 import contourpy
 import numpy as np
-import time as timer
 
 try:
     import cupy as cp  # won't work on cpu nodes
 except ImportError:
     pass
+import pickle as pkl
+from dataclasses import dataclass
+from itertools import product
+from pathlib import Path
+from typing import Any, Optional, Tuple, Union, Iterable
+
+import cartopy.crs as ccrs
+import cartopy.feature as feat
+import matplotlib as mpl
 import pandas as pd
 import xarray as xr
 import xrft
-import pickle as pkl
-import matplotlib as mpl
-from matplotlib import pyplot as plt, cm, path as mpath, ticker as mticker
-from matplotlib.colors import BoundaryNorm
-from matplotlib.figure import Figure
+from cdo import Cdo
+from joblib import Parallel, delayed
+from kmedoids import KMedoids
+from matplotlib import cm
+from matplotlib import path as mpath
+from matplotlib import pyplot as plt
+from matplotlib import ticker as mticker
 from matplotlib.axes import Axes
 from matplotlib.colorbar import Colorbar
+from matplotlib.colors import BoundaryNorm
 from matplotlib.container import BarContainer
-import cartopy.crs as ccrs
-import cartopy.feature as feat
+from matplotlib.figure import Figure
+from matplotlib.gridspec import GridSpec
+from nptyping import Float, Int, NDArray, Object, Shape
+from scipy import constants as co
+from scipy import linalg
+from scipy.stats import gaussian_kde
+from scipy.stats import norm as normal_dist
 from simpsom import SOMNet
-from scipy.stats import gaussian_kde, norm as normal_dist
-from scipy import linalg, constants as co
-from typing import Union, Any, Tuple, Optional
-from nptyping import NDArray, Object, Shape, Int, Float
-from dataclasses import dataclass
-from pathlib import Path
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA as pca
-from kmedoids import KMedoids
-from joblib import delayed, Parallel
 from sklearn.metrics.pairwise import euclidean_distances
-from cdo import Cdo
 
 # logging.basicConfig(level=logging.DEBUG)
 pf = platform.platform()
@@ -121,6 +130,8 @@ def degsin(x: float) -> float:
 DATERANGEPL = pd.date_range("19590101", "20211231")
 YEARSPL = np.unique(DATERANGEPL.year)
 DATERANGEML = pd.date_range("19770101", "20211231")
+DATERANGEPL_SUMMER = DATERANGEPL[np.isin(DATERANGEPL.month, [6, 7, 8])]
+
 WINDBINS = np.arange(0, 25, 0.5)
 LATBINS = np.arange(15, 75.1, 0.5)
 LONBINS = np.arange(-90, 30, 1)
@@ -225,6 +236,26 @@ def make_boundary_path(
     return boundary_path
 
 
+def honeycomb_panel(
+    ncol, nrow, ratio: int = None, subplot_kw: dict = None
+) -> Tuple[Figure, NDArray[Any, Object]]:
+    if ratio is None:
+        fig = plt.figure(figsize=(20, 14))
+    else:
+        fig = plt.figure(figsize=(20, ratio * 20))
+    gs = GridSpec(nrow, 2 * ncol + 1, hspace=0, wspace=0)
+    axes = np.empty((ncol, nrow), dtype=object)
+    if subplot_kw is None:
+        subplot_kw = {}
+    for i, j in product(range(ncol), range(nrow)):
+        if j % 2 == 0:
+            slice_x = slice(2 * i, 2 * i + 2)
+        else:
+            slice_x = slice(2 * i + 1, 2 * i + 2 + 1)
+        axes[i, j] = fig.add_subplot(gs[nrow - j - 1, slice_x], **subplot_kw)
+    return fig, axes
+
+
 def clusterplot(
     nrow: int,
     ncol: int,
@@ -237,6 +268,7 @@ def clusterplot(
     lambert_projection: bool = False,
     cmap: str = "seismic",
     contours: bool = True,
+    honeycomb: bool = False,
 ) -> Tuple[Figure, NDArray[Any, Object], Colorbar]:
     """Creates nice layout of plots with a common colorbar and color normalization
 
@@ -264,13 +296,18 @@ def clusterplot(
         )
     else:
         projection = ccrs.PlateCarree()
-    fig, axes = plt.subplots(
-        nrow,
-        ncol,
-        figsize=(int(6.5 * ncol), int(4.5 * nrow)),
-        subplot_kw={"projection": projection},
-        constrained_layout=True,
-    )
+    if honeycomb:
+        fig, axes = honeycomb_panel(
+            nrow, ncol, None, subplot_kw={"projection": projection}
+        )
+    else:
+        fig, axes = plt.subplots(
+            nrow,
+            ncol,
+            figsize=(int(6.5 * ncol), int(4.5 * nrow)),
+            subplot_kw={"projection": projection},
+            constrained_layout=True,
+        )
     if lambert_projection:
         extent = [np.amin(lon), np.amax(lon), np.amin(lat), np.amax(lat)]
         boundary = make_boundary_path(*extent)
@@ -433,7 +470,7 @@ def compute_anomaly(
     """computes daily anomalies extracted using a (possibly smoothed) climatology
 
     Args:
-        ds (DataArray):
+        da (xr.DataArray):
         return_clim (bool, optional): whether to also return the climatology (possibly smoothed). Defaults to False.
         smooth_kmax (bool, optional): maximum k for fourier smoothing of the climatology. No smoothing if None. Defaults to None.
 
@@ -465,6 +502,18 @@ def figtitle(
     maxlat: str,
     season: str,
 ) -> str:
+    """Write extend of a region lon lat box in a nicer way, plus season
+
+    Args:
+        minlon (str): minimum longitude
+        maxlon (str): maximum longitude
+        minlat (str): minimum latitude
+        maxlat (str): maximum latitude
+        season (str): season  
+
+    Returns:
+        str: Nice title
+    """
     minlon, maxlon, minlat, maxlat = (
         float(minlon),
         float(maxlon),
@@ -480,7 +529,58 @@ def figtitle(
 
 
 def CIequal(str1: str, str2: str) -> bool:
+    """case-insensitive string equality check
+
+    Args:
+        str1 (str): first string
+        str2 (str): second string
+
+    Returns:
+        bool: case insensitive string equality
+    """
     return str1.casefold() == str2.casefold()
+
+def hotspells_mask(filename: str = 'hotspells.csv', daysbefore: int = 21, daysafter: int = 5, timerange: NDArray | pd.DatetimeIndex | xr.DataArray = None, names: Iterable = None) -> xr.DataArray:
+    """Returns timeseries mask of hotspells in several regions in `timerange` as a xr.DataArray with two dimensions and coordinates. It has shape (len(timerange), n_regions). n_regions is either inferred from the file or from the len of names if it is provided
+
+    Args:
+        filename (str, optional): path to hotspell center dates. Defaults to 'hotspells.csv'.
+        daysbefore (int, optional): how many days before the center will the mask extend (inclusive). Defaults to 21.
+        daysafter (int, optional): how many days after the center will the mask extend (inclusive). Defaults to 5.
+        timerange (NDArray | pd.DatetimeIndex | xr.DataArray, optional): the time range to mask. Defaults to DATERANGEPL.
+        names (Iterable, optional): names of the regions. See body for default values.
+
+    Returns:
+        xr.DataArray: at position (day, region) this is True if this day is part of a hotspell in this region
+    """
+    if names is None:
+        names = ["South", "West", "Balkans", "Scandinavia", "Russia", "Arctic"]
+    if timerange is None:
+        timerange = DATERANGEPL
+    else:
+        try:
+            timerange = timerange.values
+        except AttributeError:
+            pass
+        timerange = pd.DatetimeIndex(timerange).floor(freq='1D')
+    list_of_dates = np.loadtxt(filename, delimiter=",", dtype=np.datetime64)
+    assert(len(names) == list_of_dates.shape[1])
+    data = np.zeros((len(timerange), len(names)), dtype=bool)
+    coords = {
+        'time': timerange,
+        'regions': names
+    }
+    data = xr.DataArray(data, coords=coords)
+    for i, dates in enumerate(list_of_dates.T):
+        dates = np.sort(dates)
+        dates = dates[
+            ~(np.isnat(dates) | (np.datetime_as_string(dates, unit="Y") == "2022"))
+        ]
+        for date in dates:
+            tsta = date - np.timedelta64(daysbefore, "D")
+            tend = date + np.timedelta64(daysafter, "D")
+            data.loc[tsta:tend, names[i]] = True
+    return data
 
 
 @dataclass(init=False)
@@ -978,7 +1078,7 @@ class ClusteringExperiment(Experiment):
                 GPU=GPU,
                 init="pca",
                 **kwargs,
-                output_path=self.path.as_posix(),
+                # output_path=self.path.as_posix(),
             )
             net.train(**train_kwargs)
             net.save_map(output_path.as_posix())
