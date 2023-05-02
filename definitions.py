@@ -173,6 +173,10 @@ ZOO = [
     "Mea",
 ]
 
+REGIONS = [
+    "South", "West", "Balkans", "Scandinavia", "Russia", "Arctic"
+]
+
 COASTLINE = feat.NaturalEarthFeature(
     "physical", "coastline", "110m", edgecolor="black", facecolor="none"
 )
@@ -554,7 +558,7 @@ def hotspells_mask(filename: str = 'hotspells.csv', daysbefore: int = 21, daysaf
         xr.DataArray: at position (day, region) this is True if this day is part of a hotspell in this region
     """
     if names is None:
-        names = ["South", "West", "Balkans", "Scandinavia", "Russia", "Arctic"]
+        names = REGIONS
     if timerange is None:
         timerange = DATERANGEPL
     else:
@@ -568,7 +572,7 @@ def hotspells_mask(filename: str = 'hotspells.csv', daysbefore: int = 21, daysaf
     data = np.zeros((len(timerange), len(names)), dtype=bool)
     coords = {
         'time': timerange,
-        'regions': names
+        'region': names
     }
     data = xr.DataArray(data, coords=coords)
     for i, dates in enumerate(list_of_dates.T):
