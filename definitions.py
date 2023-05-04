@@ -26,15 +26,15 @@ import xrft
 from cdo import Cdo
 from joblib import Parallel, delayed
 from kmedoids import KMedoids
-from matplotlib import cm
 from matplotlib import path as mpath
 from matplotlib import pyplot as plt
 from matplotlib import ticker as mticker
-from matplotlib.axes import Axes
-from matplotlib.colorbar import Colorbar
-from matplotlib.colors import BoundaryNorm
-from matplotlib.container import BarContainer
 from matplotlib.figure import Figure
+from matplotlib.axes import Axes
+from matplotlib.cm import ScalarMappable
+from matplotlib.colorbar import Colorbar
+from matplotlib.colors import BoundaryNorm, Normalize, ListedColormap, LinearSegmentedColormap
+from matplotlib.container import BarContainer
 from matplotlib.gridspec import GridSpec
 from nptyping import Float, Int, NDArray, Object, Shape
 from scipy import constants as co
@@ -53,7 +53,7 @@ if pf.find("cray") >= 0:
     DATADIR = "/scratch/snx3000/hbanderi/data/persistent"
 elif platform.node()[:4] == "clim":
     NODE = "CLIM"
-    DATADIR = "/scratch/hugo"
+    DATADIR = "/scratch2/hugo"
 elif pf.find("el7") >= 0:  # find better later
     NODE = "UBELIX"
     DATADIR = "/storage/scratch/users/hb22g102"
@@ -183,7 +183,7 @@ COASTLINE = feat.NaturalEarthFeature(
 BORDERS = feat.NaturalEarthFeature(
     "cultural",
     "admin_0_boundary_lines_land",
-    "110m",
+    "10m",
     edgecolor="grey",
     facecolor="none",
 )
@@ -324,7 +324,7 @@ def clusterplot(
     levels = np.delete(levels0, nlevels - 1)
     cmap = mpl.colormaps[cmap]
     norm = BoundaryNorm(levels, cmap.N, extend="both")
-    im = cm.ScalarMappable(norm=norm, cmap=cmap)
+    im = ScalarMappable(norm=norm, cmap=cmap)
     axes = np.atleast_1d(axes).flatten()
     for i in range(len(to_plot)):
         axes[i].contourf(
@@ -544,6 +544,7 @@ def CIequal(str1: str, str2: str) -> bool:
     """
     return str1.casefold() == str2.casefold()
 
+
 def hotspells_mask(filename: str = 'hotspells.csv', daysbefore: int = 21, daysafter: int = 5, timerange: NDArray | pd.DatetimeIndex | xr.DataArray = None, names: Iterable = None) -> xr.DataArray:
     """Returns timeseries mask of hotspells in several regions in `timerange` as a xr.DataArray with two dimensions and coordinates. It has shape (len(timerange), n_regions). n_regions is either inferred from the file or from the len of names if it is provided
 
@@ -585,6 +586,54 @@ def hotspells_mask(filename: str = 'hotspells.csv', daysbefore: int = 21, daysaf
             tend = date + np.timedelta64(daysafter, "D")
             data.loc[tsta:tend, names[i]] = True
     return data
+
+
+def get_hostpells_v2(filename: str = 'hotspells_v2.csv', lag_behind: int = 10, regions: list = None) -> list:
+    if regions is None:
+        regions = REGIONS
+    hotspells_raw = pd.read_csv(filename)
+    hotspells = []
+    maxlen = 0
+    maxnhs = 0
+    for i, key in enumerate(regions):
+        hotspells.append([])
+        for line in hotspells_raw[f'dates{i + 1}']:
+            if line == '-999':
+                continue
+            dateb, datee = [np.datetime64(d) for d in line.split('/')]
+            dateb -= np.timedelta64(lag_behind, 'D')
+            hotspells[-1].append(pd.date_range(dateb, datee, freq='1D'))
+            maxlen = max(maxlen, len(hotspells[-1][-1]))
+        maxnhs = max(maxnhs, len(hotspells[-1]))
+    return hotspells, maxnhs, maxlen
+
+
+def apply_hotspells_mask_v2(hotspells: list, da: xr.DataArray, maxlen: int = None, maxnhs: int = None, regions: list = None, lag_behind: int = 10) -> xr.DataArray:
+    if regions is None:
+        regions = REGIONS
+    assert len(regions) == len(hotspells)
+    if maxlen is None or maxnhs is None:
+        maxlen = 0
+        maxnhs = 0
+        for region in hotspells:
+            maxnhs = max(maxnhs, len(region))
+            for hotspell in region:
+                maxlen = max(maxlen, len(hotspell))
+    data = np.zeros((da.shape[1], len(hotspells), maxnhs, maxlen))
+    data[:] = np.nan
+    da_masked = xr.DataArray(
+        data, 
+        coords={
+            list(da.coords)[1]: np.arange(da.shape[1]), 'region': regions, 'hotspell': np.arange(maxnhs), 'day_after_beg': np.arange(maxlen) - lag_behind,
+        },
+    )
+    for i, regionhs in enumerate(hotspells):
+        for j, hotspell in enumerate(regionhs):
+            try:
+                da_masked[:, i, j, :len(hotspell)] = da.sel(time=hotspells[i][j].values).values.T
+            except KeyError:
+                ...
+    return da_masked
 
 
 @dataclass(init=False)
