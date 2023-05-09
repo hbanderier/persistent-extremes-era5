@@ -129,8 +129,13 @@ def degsin(x: float) -> float:
 
 DATERANGEPL = pd.date_range("19590101", "20211231")
 YEARSPL = np.unique(DATERANGEPL.year)
-DATERANGEML = pd.date_range("19770101", "20211231")
 DATERANGEPL_SUMMER = DATERANGEPL[np.isin(DATERANGEPL.month, [6, 7, 8])]
+
+DATERANGEPL_EXT = pd.date_range("19400101", "20221231")
+YEARSPL_EXT = np.unique(DATERANGEPL_EXT.year)
+DATERANGEPL_EXT_SUMMER = DATERANGEPL_EXT[np.isin(DATERANGEPL_EXT.month, [6, 7, 8])]
+
+DATERANGEML = pd.date_range("19770101", "20211231")
 
 WINDBINS = np.arange(0, 25, 0.5)
 LATBINS = np.arange(15, 75.1, 0.5)
@@ -244,9 +249,9 @@ def honeycomb_panel(
     ncol, nrow, ratio: int = None, subplot_kw: dict = None
 ) -> Tuple[Figure, NDArray[Any, Object]]:
     if ratio is None:
-        fig = plt.figure(figsize=(20, 14))
+        fig = plt.figure(figsize=(ncol * 2, nrow * 1.4))
     else:
-        fig = plt.figure(figsize=(20, ratio * 20))
+        fig = plt.figure(figsize=(nrow * 2, ratio * nrow * 2))
     gs = GridSpec(nrow, 2 * ncol + 1, hspace=0, wspace=0)
     axes = np.empty((ncol, nrow), dtype=object)
     if subplot_kw is None:
@@ -298,17 +303,20 @@ def clusterplot(
         projection = ccrs.LambertConformal(
             central_longitude=np.mean(lon),
         )
+        ratio = None
     else:
         projection = ccrs.PlateCarree()
+        ratio = (lat[-1] - lat[0]) / (lon[-1] - lon[0])  * nrow / ncol
     if honeycomb:
         fig, axes = honeycomb_panel(
-            nrow, ncol, None, subplot_kw={"projection": projection}
+            nrow, ncol, ratio, subplot_kw={"projection": projection}
         )
     else:
+        ratio = 1 if ratio is None else ratio
         fig, axes = plt.subplots(
             nrow,
             ncol,
-            figsize=(int(6.5 * ncol), int(4.5 * nrow)),
+            figsize=(6.5 * ncol, 6.5 * ncol * ratio),
             subplot_kw={"projection": projection},
             constrained_layout=True,
         )
@@ -712,6 +720,13 @@ class Experiment(object):
             da = da.rename({"longitude": "lon", "latitude": "lat"})
         except ValueError:
             pass
+        for daterange in (DATERANGEPL, DATERANGEPL_EXT):
+            if len(da.time) == len(daterange):
+                da = da.assign_coords({'time': daterange.values})
+                break
+            elif len(da.drop_duplicates(dim='time').time) == len(daterange):
+                da = da.drop_duplicates(dim='time').assign_coords({'time': daterange.values})
+                break
         if isinstance(season, list):
             da.isel(time=np.isin(da.time.dt.month, season))
         elif isinstance(season, str):

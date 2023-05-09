@@ -6,19 +6,18 @@ import cdsapi
 
 
 def main():
+    basepath = f'{DATADIR}/ERA5/prec/surf/raw'
     c = cdsapi.Client()
     for year in range(1940, 2023):
-        if os.path.isfile(f'{DATADIR}/ERA5/Wind/Multi/raw/{year}.nc'):
+        ofile = f'{basepath}/{year}.nc'
+        if os.path.isfile(ofile):
             continue
         c.retrieve(
-            'reanalysis-era5-pressure-levels',
+            'reanalysis-era5-single-levels',
             {
                 'product_type': 'reanalysis',
                 'format': 'netcdf',
-                'variable': 'u_component_of_wind',
-                'pressure_level': [
-                    '300', '500', '700', '775', '850', '925'
-                ],
+                'variable': 'total_precipitation',
                 'year': str(year),
                 'month': [
                     '01', '02', '03',
@@ -43,11 +42,11 @@ def main():
                     '00:00', '06:00', '12:00',
                     '18:00',
                 ],
-		'area': [90, -100, 0, 100],
+                'area': [90, -100, 0, 100],
                 'grid': '0.5/0.5',
                 'format': 'netcdf',
             },
-            f'{DATADIR}/ERA5/Wind/Multi/raw/{year}.nc')
+            ofile)
         
 
 if __name__ == '__main__':

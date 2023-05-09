@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name="Download ERA5"
-#SBATCH --time=08:00:00
+#SBATCH --time=04:00:00
 #SBATCH --mem-per-cpu=1G
 
 # Your code below this line
 source /storage/homefs/hb22g102/setup_conda.sh
-srun python ../download_ERA5.py
+srun python ../download_prec.py
