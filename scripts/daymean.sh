@@ -3,7 +3,7 @@
 
 basepath="/storage/scratch/users/hb22g102/$1"
 echo ${basepath}
-for year in $(seq -f "%04g" 1959 2021); do
+for year in $(seq -f "%04g" 1940 2022); do
 	ofile="${basepath}/dailymean/${year}.nc"
 	echo ${ofile}
 	if [ ! -f ${ofile} ]; then

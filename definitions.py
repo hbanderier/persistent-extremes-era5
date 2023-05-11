@@ -39,8 +39,8 @@ from matplotlib.gridspec import GridSpec
 from nptyping import Float, Int, NDArray, Object, Shape
 from scipy import constants as co
 from scipy import linalg
-from scipy.stats import gaussian_kde
-from scipy.stats import norm as normal_dist
+from scipy.stats import gaussian_kde, norm as normal_dist
+from scipy.optimize import minimize
 from simpsom import SOMNet
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA as pca
@@ -856,6 +856,17 @@ class Experiment(object):
         return da.groupby("time.dayofyear") + clim
 
 
+def _compute_autocorrs(X: NDArray[Shape["*, *"], Float], lag_max: int, i_max: int) -> NDArray[Shape["*, *, *"], Float]:
+    autocorrs = []
+    for i in range(lag_max):
+        autocorrs.append(
+            np.cov(X[i:], np.roll(X, i, axis=0)[i:], rowvar=False)[
+                i_max:, :i_max
+            ]
+        )
+    return np.asarray(autocorrs)
+    
+
 @dataclass(init=False)
 class ClusteringExperiment(Experiment):
     midfix: str = "anomaly"
@@ -977,50 +988,93 @@ class ClusteringExperiment(Experiment):
             X = np.pad(X, [[0, 0], [0, diff_n_pcas]])
             return pca_results.inverse_transform(X)
         return X.reshape(X.shape[0], -1)
+    
+    def _compute_opps_T1(self, X, n_pcas, lag_max) -> dict:
+        autocorrs = _compute_autocorrs(X, lag_max, n_pcas)
+        M = np.sum(autocorrs + autocorrs.transpose((0, 2, 1)),axis=0)
+
+        invC0 = linalg.inv(autocorrs[0])
+        eigenvals, eigenvecs = linalg.eigh(0.5 * invC0 @ M)
+        OPPs = autocorrs[0] @ eigenvecs.T
+        idx = np.argsort(eigenvals)[::-1]
+        eigenvals = eigenvals[idx]
+        OPPs = OPPs[idx]
+        return {
+            "T": eigenvals,
+            "OPPs": OPPs,
+        }
+    
+    def _compute_opps_T2(self, X, n_pcas, lag_max) -> dict:
+        autocorrs = _compute_autocorrs(X, lag_max, n_pcas)
+        C0sqrt = linalg.sqrtm(autocorrs[0])
+        C0minushalf = linalg.inv(C0sqrt)
+        basis = linalg.orth(C0minushalf)
+
+        def minus_T2(x) -> float:
+            normxsq = linalg.norm(x) ** 2
+            factor1 = x.T @ C0minushalf @ autocorrs @ C0minushalf @ x
+            return - np.sum(factor1 ** 2) / normxsq ** 2
+
+        def minus_T2_gradient(x) -> NDArray[Shape["*"], Float]:
+            normxsq = linalg.norm(x) ** 2
+            factor1 = x.T @ C0minushalf @ autocorrs @ C0minushalf @ x
+            numerator = np.sum((factor1)[:, None] * ((C0minushalf @ (autocorrs + autocorrs.transpose((0, 2, 1))) @ C0minushalf) @ x), axis=0)
+            return - numerator / normxsq ** 2 - 4 * minus_T2(x) * x / normxsq ** 3
+
+        def norm0(x) -> float:
+            return 10 - linalg.norm(x) ** 2
+
+        def jac_norm0(x) -> NDArray[Shape["*"], Float]:
+            return - 2 * x
+        
+        Id = np.eye(n_pcas)
+        proj = Id.copy()
+        OPPs = []
+        T2s = []
+        numsuc = 0
+        while numsuc < 10:
+            xmin, xmax = np.amin(basis, axis=0), np.amax(basis, axis=0)
+            x0 = xmin + (xmax - xmin) * np.random.rand(len(xmax))
+            res = minimize(minus_T2, x0, jac=minus_T2_gradient, method='SLSQP', constraints={'type': 'ineq', 'fun': norm0, 'jac': jac_norm0})
+            if res.success:
+                unit_x = res.x / linalg.norm(res.x)
+                OPPs.append(C0sqrt @ unit_x)
+                T2s.append(-res.fun)
+                proj = Id - np.outer(unit_x, unit_x)
+                autocorrs = proj @ autocorrs @ proj
+                C0minushalf = proj @ C0minushalf @ proj
+                numsuc += 1
+                
+        return {
+            "T": np.asarray(T2s),
+            "OPPs": np.asarray(OPPs),
+        }
 
     def compute_opps(
         self,
         n_pcas: int = None,
-        lag_max: int = 15,
+        lag_max: int = 90,
+        type: int = 1,
         return_realspace: bool = False,
     ) -> Path | Tuple[NDArray, xr.DataArray, Path]:
         """
         I could GPU this fairly easily. Is it worth it tho ?
         """
+        if type not in [1, 2]:
+            raise ValueError(f'Wrong OPP type, pick 1 or 2')
         X, da = self.prepare_for_clustering()
         X = self.pca_transform(X, n_pcas)
         X = X.reshape((X.shape[0], -1))
         n_pcas = X.shape[1]
         opp_path: Path = self.path.joinpath(
-            f"opp_{n_pcas}_{self.midfix}_{self.season}.pkl"
+            f"opp_{n_pcas}_{self.midfix}_{self.season}_T{type}.pkl"
         )
         results = None
         if not opp_path.is_file():
-            autocorrs = []
-            for j in range(lag_max):
-                autocorrs.append(
-                    np.cov(X[j:], np.roll(X, j, axis=0)[j:], rowvar=False)[
-                        n_pcas:, :n_pcas
-                    ]
-                )
-
-            autocorrs = np.asarray(autocorrs)
-            M = autocorrs[0] + np.sum(
-                [autocorrs[i] + autocorrs[i].transpose() for i in range(1, lag_max)],
-                axis=0,
-            )
-
-            invsqrtC0 = linalg.inv(linalg.sqrtm(autocorrs[0]))
-            symS = invsqrtC0.T @ M @ invsqrtC0
-            eigenvals, eigenvecs = linalg.eigh(symS)
-            OPPs = autocorrs[0] @ (invsqrtC0 @ eigenvecs.T)
-            idx = np.argsort(eigenvals)[::-1]
-            eigenvals = eigenvals[idx]
-            OPPs = OPPs[idx]
-            results = {
-                "eigenvals": eigenvals,
-                "OPPs": OPPs,
-            }
+            if type == 1:
+                results = self._compute_opps_T1(X, n_pcas, lag_max)
+            if type == 2:
+                results = self._compute_opps_T2(X, n_pcas, lag_max)
             with open(opp_path, "wb") as handle:
                 pkl.dump(results, handle)
         if not return_realspace:
@@ -1042,8 +1096,9 @@ class ClusteringExperiment(Experiment):
         self,
         X: NDArray[Shape["*, *"], Float],
         n_opps: int,
+        type: int = 1,
     ) -> NDArray[Shape["*, *"], Float]:
-        opp_path = self.compute_opps(n_opps)
+        opp_path = self.compute_opps(n_opps, type=type)
         with open(opp_path, "rb") as handle:
             opp_results = pkl.load(handle)
         if not X.shape[1] == n_opps:
@@ -1057,8 +1112,9 @@ class ClusteringExperiment(Experiment):
         X: NDArray[Shape["*, *"], Float],
         n_opps: int = None,
         to_realspace=False,
+        type: int = 1,
     ) -> NDArray[Shape["*, *"], Float]:
-        opp_path = self.compute_opps(n_opps)
+        opp_path = self.compute_opps(n_opps, type=type)
         with open(opp_path, "rb") as handle:
             opp_results = pkl.load(handle)
         OPPs = opp_results["OPPs"]
