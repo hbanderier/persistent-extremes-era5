@@ -59,73 +59,6 @@ elif pf.find("el7") >= 0:  # find better later
     DATADIR = "/storage/scratch/users/hb22g102"
     os.environ["CDO"] = "/storage/homefs/hb22g102/mambaforge/envs/env11/bin/cdo"
 CLIMSTOR = "/mnt/climstor/ecmwf/era5-new/raw"
-cdo = Cdo()
-
-
-def filenamesml(
-    y: int, m: int, d: int
-) -> str:  # Naming conventions of the files on climstor (why are they so different?)
-    return [
-        f"{CLIMSTOR}/ML/data/{str(y)}/P{str(y)}{str(m).zfill(2)}{str(d).zfill(2)}_{str(h).zfill(2)}"
-        for h in range(0, 24, 6)
-    ]
-
-
-def filenamessfc(
-    y: int, m: int, d: int
-) -> str:  # Naming conventions of the files on climstor (why are they so different?)
-    return [
-        f"{CLIMSTOR}/SFC/data/{str(y)}/an_sfc_ERA5_{str(y)}-{str(m).zfill(2)}-{str(d).zfill(2)}.nc"
-    ]
-
-
-def filenamespl(y: int, m: int, d: int) -> str:
-    return [
-        f"{CLIMSTOR}/PL/data/an_pl_ERA5_{str(y)}-{str(m).zfill(2)}-{str(d).zfill(2)}.nc"
-    ]  # returns iterable to have same call signature as filenamescl(y, m, d)
-
-
-def filenamegeneric(y: int, m: int, folder: int) -> str:
-    return [f"{DATADIR}/{folder}/{y}{str(m).zfill(2)}.nc"]
-
-
-def _fn(date: pd.Timestamp, which: str) -> str:
-    if which == "ML":
-        return filenamesml(date.year, date.month, date.day)
-    elif which == "PL":
-        return filenamespl(date.year, date.month, date.day)
-    elif which == "SFC":
-        return filenamessfc(date.year, date.month, date.day)
-    else:
-        return filenamegeneric(date.year, date.month, which)
-
-
-# instead takes pandas.timestamp (or iterable of _) as input
-def fn(date: Union[list, NDArray, pd.DatetimeIndex, pd.Timestamp], which):
-    if isinstance(date, (list, NDArray, pd.DatetimeIndex)):
-        filenames = []
-        for d in date:
-            filenames.extend(_fn(d, which))
-        return filenames
-    elif isinstance(date, pd.Timestamp):
-        return _fn(date, which)
-    else:
-        raise TypeError(f"Invalid type : {type(date)}")
-
-
-RADIUS = 6.371e6  # m
-OMEGA = 7.2921e-5  # rad.s-1
-KAPPA = 0.2854
-R_SPECIFIC_AIR = 287.0500676
-
-
-def degcos(x: float) -> float:
-    return np.cos(x / 180 * np.pi)
-
-
-def degsin(x: float) -> float:
-    return np.sin(x / 180 * np.pi)
-
 
 DATERANGEPL = pd.date_range("19590101", "20211231")
 YEARSPL = np.unique(DATERANGEPL.year)
@@ -194,6 +127,77 @@ BORDERS = feat.NaturalEarthFeature(
 )
 
 SMALLNAME = {"Geopotential": "z", "Wind": "s", "Temperature": "t"}  # Wind speed
+
+RADIUS = 6.371e6  # m
+OMEGA = 7.2921e-5  # rad.s-1
+KAPPA = 0.2854
+R_SPECIFIC_AIR = 287.0500676
+
+cdo = None
+
+def setup_cdo() -> None:
+    global cdo 
+    if not cdo:
+        cdo = Cdo()
+
+
+def filenamesml(
+    y: int, m: int, d: int
+) -> str:  # Naming conventions of the files on climstor (why are they so different?)
+    return [
+        f"{CLIMSTOR}/ML/data/{str(y)}/P{str(y)}{str(m).zfill(2)}{str(d).zfill(2)}_{str(h).zfill(2)}"
+        for h in range(0, 24, 6)
+    ]
+
+
+def filenamessfc(
+    y: int, m: int, d: int
+) -> str:  # Naming conventions of the files on climstor (why are they so different?)
+    return [
+        f"{CLIMSTOR}/SFC/data/{str(y)}/an_sfc_ERA5_{str(y)}-{str(m).zfill(2)}-{str(d).zfill(2)}.nc"
+    ]
+
+
+def filenamespl(y: int, m: int, d: int) -> str:
+    return [
+        f"{CLIMSTOR}/PL/data/an_pl_ERA5_{str(y)}-{str(m).zfill(2)}-{str(d).zfill(2)}.nc"
+    ]  # returns iterable to have same call signature as filenamescl(y, m, d)
+
+
+def filenamegeneric(y: int, m: int, folder: int) -> str:
+    return [f"{DATADIR}/{folder}/{y}{str(m).zfill(2)}.nc"]
+
+
+def _fn(date: pd.Timestamp, which: str) -> str:
+    if which == "ML":
+        return filenamesml(date.year, date.month, date.day)
+    elif which == "PL":
+        return filenamespl(date.year, date.month, date.day)
+    elif which == "SFC":
+        return filenamessfc(date.year, date.month, date.day)
+    else:
+        return filenamegeneric(date.year, date.month, which)
+
+
+# instead takes pandas.timestamp (or iterable of _) as input
+def fn(date: Union[list, NDArray, pd.DatetimeIndex, pd.Timestamp], which):
+    if isinstance(date, (list, NDArray, pd.DatetimeIndex)):
+        filenames = []
+        for d in date:
+            filenames.extend(_fn(d, which))
+        return filenames
+    elif isinstance(date, pd.Timestamp):
+        return _fn(date, which)
+    else:
+        raise TypeError(f"Invalid type : {type(date)}")
+    
+
+def degcos(x: float) -> float:
+    return np.cos(x / 180 * np.pi)
+
+
+def degsin(x: float) -> float:
+    return np.sin(x / 180 * np.pi)
 
 
 def load_pickle(filename: str | Path) -> Any:
@@ -700,7 +704,7 @@ class Experiment(object):
             else:
                 raise ValueError(f"{region=}, wrong specifier")
         self.path = Path(DATADIR, self.dataset, self.variable, self.level, self.region)
-        self.copy_content(cdo, smooth)
+        self.copy_content(smooth)
 
     def ifile(self, suffix: str = "") -> Path:
         underscore = "" if suffix == "" else "_"
@@ -784,12 +788,13 @@ class Experiment(object):
         da["lon"] = lon
         da.to_netcdf(self.ofile("smooth"))
 
-    def copy_content(self, cdo: Cdo, smooth: bool = False):
+    def copy_content(self, smooth: bool = False):
         if not self.path.is_dir():
             os.mkdir(self.path)
         ifile = self.ifile("")
         ofile = self.ofile("")
         if not ofile.is_file() and (not smooth and not self.region == "dailymean"):
+            setup_cdo()
             cdo.sellonlatbox(
                 self.minlon,
                 self.maxlon,
@@ -799,6 +804,7 @@ class Experiment(object):
                 output=ofile.as_posix(),
             )
         elif not ofile.is_file() and smooth:
+            setup_cdo()
             ofile_bigger = self.ofile("bigger")
             cdo.sellonlatbox(
                 self.minlon - 30,
@@ -825,6 +831,7 @@ class Experiment(object):
             if ofile.is_file():
                 continue
             if ifile.is_file():
+                setup_cdo()
                 cdo.sellonlatbox(
                     self.minlon,
                     self.maxlon,
@@ -902,11 +909,16 @@ class ClusteringExperiment(Experiment):
         self,
         centers: NDArray[Shape["*, *"], Float],
         da: xr.DataArray,
-        n_pcas: Optional[int],
-        coords: dict,
+        n_pcas: int,
+        coords: dict = None,
     ) -> xr.DataArray:
         centers = self.pca_inverse_transform(centers, n_pcas)
-
+        if coords is None:
+            coords = {
+                'mode': np.arange(centers.shape[0]),
+                'lat': da.lat.values,
+                'lon': da.lon.values,
+            }
         shape = [len(coord) for coord in coords.values()]
         centers = xr.DataArray(centers.reshape(shape), coords=coords)
         if CIequal(self.weigh, "sqrtcos"):
