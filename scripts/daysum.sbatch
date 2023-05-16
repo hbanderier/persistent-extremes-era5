@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name="Daysum"
-#SBATCH --time=01:30:00
+#SBATCH --time=00:30:00
 #SBATCH --mem-per-cpu=1G
 #SBATCH --cpus-per-task=16
 

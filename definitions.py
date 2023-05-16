@@ -33,7 +33,7 @@ from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 from matplotlib.cm import ScalarMappable
 from matplotlib.colorbar import Colorbar
-from matplotlib.colors import BoundaryNorm, Normalize, ListedColormap, LinearSegmentedColormap
+from matplotlib.colors import BoundaryNorm, Colormap, Normalize, ListedColormap, LinearSegmentedColormap
 from matplotlib.container import BarContainer
 from matplotlib.gridspec import GridSpec
 from nptyping import Float, Int, NDArray, Object, Shape
@@ -126,7 +126,7 @@ BORDERS = feat.NaturalEarthFeature(
     facecolor="none",
 )
 
-SMALLNAME = {"Geopotential": "z", "Wind": "s", "Temperature": "t"}  # Wind speed
+SMALLNAME = {"Geopotential": "z", "Wind": "s", "Temperature": "t", "Precipitation": "tp"}  # Wind speed
 
 RADIUS = 6.371e6  # m
 OMEGA = 7.2921e-5  # rad.s-1
@@ -279,7 +279,7 @@ def clusterplot(
     clabels: Union[bool, list] = False,
     draw_labels: bool = False,
     lambert_projection: bool = False,
-    cmap: str = "seismic",
+    cmap: str | Colormap = "seismic",
     contours: bool = True,
     honeycomb: bool = False,
 ) -> Tuple[Figure, NDArray[Any, Object], Colorbar]:
@@ -334,7 +334,8 @@ def clusterplot(
         nlevels - 1,
     )
     levels = np.delete(levels0, nlevels - 1)
-    cmap = mpl.colormaps[cmap]
+    if isinstance(cmap, str):
+        cmap = mpl.colormaps[cmap]
     norm = BoundaryNorm(levels, cmap.N, extend="both")
     im = ScalarMappable(norm=norm, cmap=cmap)
     axes = np.atleast_1d(axes).flatten()
@@ -672,7 +673,7 @@ class Experiment(object):
         minlat: Optional[int | float] = None,
         maxlat: Optional[int | float] = None,
         smooth: bool = False,
-    ):
+    ) -> None:
         self.dataset = dataset
         self.variable = variable
         self.level = str(level)
@@ -752,13 +753,10 @@ class Experiment(object):
         return da
 
     def detrend(self, n_workers: int = 8):
-        da = self.open_da(chunks={"time": -1, "lon": 20, "lat": 20})
-        anom, clim = compute_anomaly(da, return_clim=True)
-        anom = anom.compute(n_workers=n_workers)
+        da = self.open_da(chunks={"time": -1, "lon": 30, "lat": 30})
+        anom = da.map_blocks(compute_anomaly, template=da).compute(n_workers=n_workers)
         anom.to_netcdf(self.ofile("anomaly"))
-        # clim = compute_climatology(da).compute(n_workers=n_workers)
-        clim.to_netcdf(self.ofile("climatology"))
-        anom = xrft.detrend(anom, "time", "linear").compute(n_workers=n_workers)
+        anom = anom.map_blocks(xrft.detrend, template=anom, args=["time", "linear"]).compute(n_workers=n_workers)
         anom.to_netcdf(self.ofile("detrended"))
 
     def get_winsize(self, da: xr.DataArray) -> Tuple[float, float, float]:
@@ -856,7 +854,7 @@ class Experiment(object):
         return da.groupby("time.dayofyear") + clim
 
 
-def _compute_autocorrs(X: NDArray[Shape["*, *"], Float], lag_max: int, i_max: int) -> NDArray[Shape["*, *, *"], Float]:
+def compute_autocorrs(X: NDArray[Shape["*, *"], Float], lag_max: int, i_max: int) -> NDArray[Shape["*, *, *"], Float]:
     autocorrs = []
     for i in range(lag_max):
         autocorrs.append(
@@ -921,12 +919,14 @@ class ClusteringExperiment(Experiment):
         centers: NDArray[Shape["*, *"], Float],
         da: xr.DataArray,
         n_pcas: int,
-        coords: dict = None,
+        coords: dict | str = None,
     ) -> xr.DataArray:
         centers = self.pca_inverse_transform(centers, n_pcas)
         if coords is None:
+            coords = 'mode'
+        if isinstance(coords, str):
             coords = {
-                'mode': np.arange(centers.shape[0]),
+                coords : np.arange(centers.shape[0]),
                 'lat': da.lat.values,
                 'lon': da.lon.values,
             }
@@ -990,8 +990,8 @@ class ClusteringExperiment(Experiment):
         return X.reshape(X.shape[0], -1)
     
     def _compute_opps_T1(self, X, n_pcas, lag_max) -> dict:
-        autocorrs = _compute_autocorrs(X, lag_max, n_pcas)
-        M = np.sum(autocorrs + autocorrs.transpose((0, 2, 1)),axis=0)
+        autocorrs = compute_autocorrs(X, lag_max, n_pcas)
+        M = np.trapz(autocorrs + autocorrs.transpose((0, 2, 1)), axis=0)
 
         invC0 = linalg.inv(autocorrs[0])
         eigenvals, eigenvecs = linalg.eigh(0.5 * invC0 @ M)
@@ -999,13 +999,15 @@ class ClusteringExperiment(Experiment):
         idx = np.argsort(eigenvals)[::-1]
         eigenvals = eigenvals[idx]
         OPPs = OPPs[idx]
+        T1s = np.sum(OPPs.reshape(OPPs.shape[0], 1, 1, OPPs.shape[1]) @ autocorrs @ OPPs.reshape(OPPs.shape[0], 1, OPPs.shape[1], 1), axis=1).squeeze()
+        T1s /= (OPPs.reshape(OPPs.shape[0], 1, OPPs.shape[1]) @ autocorrs[0] @ OPPs.reshape(OPPs.shape[0], OPPs.shape[1], 1)).squeeze()
         return {
-            "T": eigenvals,
+            "T": T1s,
             "OPPs": OPPs,
         }
     
     def _compute_opps_T2(self, X, n_pcas, lag_max) -> dict:
-        autocorrs = _compute_autocorrs(X, lag_max, n_pcas)
+        autocorrs = compute_autocorrs(X, lag_max, n_pcas)
         C0sqrt = linalg.sqrtm(autocorrs[0])
         C0minushalf = linalg.inv(C0sqrt)
         basis = linalg.orth(C0minushalf)
@@ -1013,12 +1015,13 @@ class ClusteringExperiment(Experiment):
         def minus_T2(x) -> float:
             normxsq = linalg.norm(x) ** 2
             factor1 = x.T @ C0minushalf @ autocorrs @ C0minushalf @ x
-            return - np.sum(factor1 ** 2) / normxsq ** 2
+            return - 2 * np.trapz(factor1 ** 2) / normxsq ** 2
 
         def minus_T2_gradient(x) -> NDArray[Shape["*"], Float]:
             normxsq = linalg.norm(x) ** 2
             factor1 = x.T @ C0minushalf @ autocorrs @ C0minushalf @ x
-            numerator = np.sum((factor1)[:, None] * ((C0minushalf @ (autocorrs + autocorrs.transpose((0, 2, 1))) @ C0minushalf) @ x), axis=0)
+            factor2 = (C0minushalf @ (autocorrs + autocorrs.transpose((0, 2, 1))) @ C0minushalf) @ x
+            numerator = 4 * np.trapz((factor1)[:, None] * factor2, axis=0)
             return - numerator / normxsq ** 2 - 4 * minus_T2(x) * x / normxsq ** 3
 
         def norm0(x) -> float:
@@ -1044,7 +1047,6 @@ class ClusteringExperiment(Experiment):
                 autocorrs = proj @ autocorrs @ proj
                 C0minushalf = proj @ C0minushalf @ proj
                 numsuc += 1
-                
         return {
             "T": np.asarray(T2s),
             "OPPs": np.asarray(OPPs),
@@ -1056,7 +1058,7 @@ class ClusteringExperiment(Experiment):
         lag_max: int = 90,
         type: int = 1,
         return_realspace: bool = False,
-    ) -> Path | Tuple[NDArray, xr.DataArray, Path]:
+    ) -> Tuple[Path, dict] | Tuple[NDArray, xr.DataArray, Path]:
         """
         I could GPU this fairly easily. Is it worth it tho ?
         """
@@ -1077,47 +1079,45 @@ class ClusteringExperiment(Experiment):
                 results = self._compute_opps_T2(X, n_pcas, lag_max)
             with open(opp_path, "wb") as handle:
                 pkl.dump(results, handle)
-        if not return_realspace:
-            return opp_path
         if results is None:
             with open(opp_path, "rb") as handle:
                 results = pkl.load(handle)
-                OPPs = results["OPPs"]
-                eigenvals = results["eigenvals"]
-        coords = {
-            "OPP": np.arange(OPPs.shape[0]),
-            "lat": da.lat.values,
-            "lon": da.lon.values,
-        }
+        if not return_realspace:
+            return opp_path, results
+        OPPs = results["OPPs"]
+        eigenvals = results["T"]
+        coords = 'OPP'
         OPPs = self.to_dataarray(OPPs, da, n_pcas, coords)
         return eigenvals, OPPs, opp_path
 
     def opp_transform(
         self,
         X: NDArray[Shape["*, *"], Float],
-        n_opps: int,
+        n_pcas: int,
+        cutoff: int = None,
         type: int = 1,
     ) -> NDArray[Shape["*, *"], Float]:
-        opp_path = self.compute_opps(n_opps, type=type)
-        with open(opp_path, "rb") as handle:
-            opp_results = pkl.load(handle)
-        if not X.shape[1] == n_opps:
-            X = self.pca_transform(X, n_opps)
-        OPPs = opp_results["OPPs"]
+        _, results = self.compute_opps(n_pcas, type=type)
+        if not X.shape[1] == n_pcas:
+            X = self.pca_transform(X, n_pcas)
+        if cutoff is None:
+            cutoff = n_pcas if type == 1 else 10
+        OPPs = results["OPPs"][:cutoff]
         X = X @ OPPs.T
         return X
 
     def opp_inverse_transform(
         self,
         X: NDArray[Shape["*, *"], Float],
-        n_opps: int = None,
+        n_pcas: int = None,
+        cutoff: int = None,
         to_realspace=False,
         type: int = 1,
     ) -> NDArray[Shape["*, *"], Float]:
-        opp_path = self.compute_opps(n_opps, type=type)
-        with open(opp_path, "rb") as handle:
-            opp_results = pkl.load(handle)
-        OPPs = opp_results["OPPs"]
+        _, results = self.compute_opps(n_pcas, type=type)
+        if cutoff is None:
+            cutoff = n_pcas if type == 1 else 10
+        OPPs = results["OPPs"][:cutoff]
         X = X @ OPPs
         if to_realspace:
             return self.pca_inverse_transform(X)
@@ -1194,7 +1194,7 @@ class ClusteringExperiment(Experiment):
             return output_path
         if OPP:
             X, da = self.prepare_for_clustering()
-            X = self.opp_transform(X, n_opps=n_pcas)
+            X = self.opp_transform(X, n_pcas=n_pcas)
         else:
             X, da = self.prepare_for_clustering()
             X = self.pca_transform(X, n_pcas=n_pcas)
@@ -1230,7 +1230,7 @@ class ClusteringExperiment(Experiment):
             "lon": da.lon.values,
         }
         if OPP:
-            centers = self.opp_inverse_transform(centers, n_opps=n_pcas)
+            centers = self.opp_inverse_transform(centers, n_pcas=n_pcas)
         centers = self.to_dataarray(centers, da, n_pcas, coords)
         return net, centers
 
