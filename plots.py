@@ -1,5 +1,6 @@
 import contourpy
 import numpy as np
+import tqdm
 from scipy.stats import gaussian_kde
 from xarray import DataArray
 from itertools import product
@@ -175,14 +176,14 @@ def infer_extent(to_plot: list, sym: bool) -> Tuple[int, float]: # I could marke
         min = np.amin(to_plot)
 
     num_digits = 1000
-    minuses = [1, 2] if not sym else [1]
-    for minus in minuses:
-        if sym:
-            max_rounded = np.round(max, - lmax + minus)
+    for minus in [0.5, 1, 1.5, 2]:
+        if minus == int(minus) and sym:
+            max_rounded = np.ceil(max * 10 ** (-lmax + minus)) * 10 ** (lmax - minus)
             min_rounded = 0
         else:
-            min_rounded = np.floor(min * 10 ** (-lmax + 1) / 5) * 5 * 10 ** (lmax - 1)
-            max_rounded = np.ceil(max * 10 ** (-lmax + 1) / 5) * 5 * 10 ** (lmax - 1)
+            minus = int(np.ceil(minus))
+            min_rounded = np.floor(min * 10 ** (-lmax + minus) / 5) * 5 * 10 ** (lmax - minus)
+            max_rounded = np.ceil(max * 10 ** (-lmax + minus) / 5) * 5 * 10 ** (lmax - minus)
         extent = max_rounded - min_rounded
         for nlev in range(4, 9):
             try:
@@ -193,12 +194,11 @@ def infer_extent(to_plot: list, sym: bool) -> Tuple[int, float]: # I could marke
             except ZeroDivisionError:
                 cand_nd = 1000
             if (
-                nlev > 4 and nlev < 8 and (
                 cand_nd < num_digits or (
                     cand_nd == num_digits and np.isclose(
                         (firstlev * 10 ** (-lmax + 1)) % 5, 0
                     )
-                ))
+                )
             ):
                 winner = (nlev, min_rounded, max_rounded)
                 num_digits = cand_nd
@@ -252,7 +252,7 @@ def doubleit(thing: list | str | None, length: int, default: str) -> list:
         return [default] * length
 
 
-class clusterplot:
+class Clusterplot:
     def __init__(
         self,
         nrow: int,
@@ -478,7 +478,7 @@ class clusterplot:
         da: DataArray,
         mask: NDArray,
         to_plot: list = None,
-        n_sel: int = None,
+        n_sel: int = 100,
         thresh_up: bool = True,
         FDR: bool = True,
         color: str = "black",
@@ -488,17 +488,17 @@ class clusterplot:
             to_plot = [
                 da.isel(time=mask[:, i]).mean(dim="time") for i in range(len(self.axes))
             ]
-
+        lon = da.lon.values
+        lat = da.lat.values
         n_sam = [np.sum(mask[:, i]) for i in range(len(self.axes))]
-        significances = [
-            field_significance(to_plot[i], da, n_sam[i], n_sel, thresh_up)[int(FDR)]
-            for i in range(len(self.axes))
-        ]
+        significances = []
+        for i in tqdm.trange(len(self.axes)):
+            significances.append(field_significance(to_plot[i], da, n_sam[i], n_sel, thresh_up)[int(FDR)])
 
         for ax, signif in zip(self.axes, significances):
             cs = ax.contourf(
-                signif.lon.values,
-                signif.lat.values,
+                lon,
+                lat,
                 signif.values,
                 levels=3,
                 hatches=["", hatch],

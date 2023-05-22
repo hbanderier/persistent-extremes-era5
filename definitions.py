@@ -352,7 +352,7 @@ def searchsortednd(a: NDArray, v: NDArray, **kwargs) -> NDArray:  # https://stac
     return (p - na * (np.arange(m)[:, None])).reshape((*orig_shapex, -1))
 
 
-def field_significance(to_test: xr.DataArray, take_from: NDArray | xr.DataArray, n_sam: int, n_sel: int = 1000, thresh_up=True) -> Tuple[NDArray, NDArray]:
+def field_significance(to_test: xr.DataArray, take_from: NDArray | xr.DataArray, n_sam: int, n_sel: int = 100, thresh_up=True) -> Tuple[xr.DataArray, xr.DataArray]:
     indices = np.random.rand(n_sel, take_from.shape[0]).argpartition(n_sam, axis=1)[:, :n_sam]
     if isinstance(take_from, xr.DataArray):
         take_from = take_from.values
@@ -379,6 +379,7 @@ def field_significance(to_test: xr.DataArray, take_from: NDArray | xr.DataArray,
         under = p < bh_line
         c = len(under) - np.argmax(under[::-1]) - 1
         fdrcorr[argp[:c]] = True
+    fdrcorr = to_test.copy(data=fdrcorr.reshape(to_test.shape))
     return nocorr, fdrcorr
 
 
