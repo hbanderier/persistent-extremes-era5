@@ -365,7 +365,7 @@ class ClusteringExperiment(Experiment):
         pca_path = self.compute_pcas(n_pcas)
         with open(pca_path, "rb") as handle:
             pca_results = pkl.load(handle)
-        diff_n_pcas = pca_results.n_components - n_pcas
+        diff_n_pcas = pca_results.n_components - X.shape[1]
         X = np.pad(X, [[0, 0], [0, diff_n_pcas]])
         X = pca_results.inverse_transform(X)
         return X.reshape(X.shape[0], -1)

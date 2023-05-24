@@ -166,7 +166,7 @@ def honeycomb_panel(
 
 
 def infer_extent(to_plot: list, sym: bool) -> Tuple[int, float]: # I could market this
-    max = np.quantile(to_plot, q=0.95)
+    max = np.quantile(to_plot, q=0.97)
     lmax = np.log10(max)
     lmax = int(np.sign(lmax) * np.round(np.abs(lmax)))
 
