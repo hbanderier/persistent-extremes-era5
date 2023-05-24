@@ -166,7 +166,7 @@ def honeycomb_panel(
 
 
 def infer_extent(to_plot: list, sym: bool) -> Tuple[int, float]: # I could market this
-    max = np.amax(to_plot)
+    max = np.quantile(to_plot, q=0.95)
     lmax = np.log10(max)
     lmax = int(np.sign(lmax) * np.round(np.abs(lmax)))
 
@@ -404,7 +404,7 @@ class Clusterplot:
         cmap: str | Colormap = None,
         transparify: bool | float = False,
         contours: bool = False,
-        clabels: Union[bool, list] = False,
+        clabels: Union[bool, list] = None,
         draw_gridlines: bool = False,
         draw_cbar: bool = True,
         cbar_ylabel: str = None,
@@ -481,7 +481,7 @@ class Clusterplot:
         n_sel: int = 100,
         thresh_up: bool = True,
         FDR: bool = True,
-        color: str = "black",
+        color: str | list = "black",
         hatch: str = "..",
     ) -> None:
         if to_plot is None:
@@ -518,7 +518,7 @@ class Clusterplot:
         nlevels: int = None,
         sym: bool = None,
         transparify: bool | float = False,
-        clabels: Union[bool, list] = False,
+        clabels: Union[bool, list] = None,
         draw_gridlines: bool = False,
         draw_cbar: bool = True,
         cbar_ylabel: str = None,

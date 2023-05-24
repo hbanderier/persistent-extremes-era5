@@ -38,6 +38,9 @@ class Experiment(object):
     maxlon: int
     minlat: int
     maxlat: int
+    lon: NDArray
+    lat: NDArray
+    coslat: NDArray
     path: str
 
     def __init__(
@@ -84,6 +87,9 @@ class Experiment(object):
             else:
                 raise ValueError(f"{region=}, wrong specifier")
         self.path = Path(DATADIR, self.dataset, self.variable, self.level, self.region)
+        self.lon = None
+        self.lat = None
+        self.coslat = None
         self.copy_content(smooth)
 
     def ifile(self, suffix: str = "") -> Path:
@@ -104,6 +110,12 @@ class Experiment(object):
             da = da.rename({"longitude": "lon", "latitude": "lat"})
         except ValueError:
             pass
+
+        if self.lon is None or self.lat is None or self.coslat is None:
+            self.lon = da.lon.values
+            self.lat = da.lat.values
+            self.coslat = degcos(np.meshgrid(np.ones(len(self.lon)), self.lat)[1])
+        
         for daterange in (DATERANGEPL, DATERANGEPL_EXT):
             if len(da.time) == len(daterange):
                 da = da.assign_coords({'time': daterange.values})
@@ -242,13 +254,16 @@ def compute_autocorrs(X: NDArray[Shape["*, *"], Float], lag_max: int, i_max: int
             ]
         )
     return np.asarray(autocorrs)
-    
+
+
+def weighted_matmul(A: NDArray, B: NDArray, weights: NDArray) -> NDArray:
+    return ((A * weights[None, :]) @ B) / np.sum(weights) * weights.size
+
 
 @dataclass(init=False)
 class ClusteringExperiment(Experiment):
     midfix: str = "anomaly"
     season: list | str = None
-    weigh: str = "sqrtcos"
 
     def __init__(
         self,
@@ -264,8 +279,7 @@ class ClusteringExperiment(Experiment):
         smooth: bool = False,
         midfix: str = "anomaly",
         season: list | str = None,
-        weigh: str = "sqrtcos",
-    ):
+    ) -> None:
         super().__init__(
             dataset,
             variable,
@@ -280,17 +294,10 @@ class ClusteringExperiment(Experiment):
         )
         self.midfix = midfix
         self.season = season
-        if weigh is not None and weigh not in ["sqrtcos", "cos"]:
-            raise ValueError(f"Wrong weigh specifier : {self.weigh}")
-        self.weigh = weigh
 
     def prepare_for_clustering(self) -> Tuple[NDArray, xr.DataArray]:
         da = self.open_da(self.midfix, self.season)
-        if CIequal(self.weigh, "sqrtcos"):
-            da *= np.sqrt(degcos(da.lat))
-        elif CIequal(self.weigh, "cos"):
-            da *= degcos(da.lat)
-        X = da.values.reshape(len(da.time), -1)
+        X = da.values.reshape(len(da.time), -1) * np.sqrt(self.coslat.flatten())[None, :]
         return X, da
 
     def to_dataarray(
@@ -311,10 +318,7 @@ class ClusteringExperiment(Experiment):
             }
         shape = [len(coord) for coord in coords.values()]
         centers = xr.DataArray(centers.reshape(shape), coords=coords)
-        if CIequal(self.weigh, "sqrtcos"):
-            centers /= np.sqrt(degcos(da.lat))
-        elif CIequal(self.weigh, "cos"):
-            centers /= degcos(da.lat)
+        centers /= np.sqrt(degcos(da.lat))
         return centers
 
     def compute_pcas(self, n_pcas: int, force: bool = False) -> str:
@@ -345,27 +349,25 @@ class ClusteringExperiment(Experiment):
     def pca_transform(
         self,
         X: NDArray[Shape["*, *"], Float],
-        n_pcas: int = None,
+        n_pcas: int,
     ) -> NDArray[Shape["*, *"], Float]:
-        if n_pcas is not None:
-            pca_path = self.compute_pcas(n_pcas)
-            with open(pca_path, "rb") as handle:
-                pca_results = pkl.load(handle)
-            return pca_results.transform(X)[:, :n_pcas]
+        pca_path = self.compute_pcas(n_pcas)
+        with open(pca_path, "rb") as handle:
+            pca_results = pkl.load(handle)
+        X = pca_results.transform(X)
         return X
-
+    
     def pca_inverse_transform(
         self,
         X: NDArray[Shape["*, *"], Float],
-        n_pcas: int = None,
+        n_pcas: int,
     ) -> NDArray[Shape["*, *"], Float]:
-        if n_pcas is not None:
-            pca_path = self.compute_pcas(n_pcas)
-            with open(pca_path, "rb") as handle:
-                pca_results = pkl.load(handle)
-            diff_n_pcas = pca_results.n_components - n_pcas
-            X = np.pad(X, [[0, 0], [0, diff_n_pcas]])
-            return pca_results.inverse_transform(X)
+        pca_path = self.compute_pcas(n_pcas)
+        with open(pca_path, "rb") as handle:
+            pca_results = pkl.load(handle)
+        diff_n_pcas = pca_results.n_components - n_pcas
+        X = np.pad(X, [[0, 0], [0, diff_n_pcas]])
+        X = pca_results.inverse_transform(X)
         return X.reshape(X.shape[0], -1)
     
     def _compute_opps_T1(self, X, n_pcas, lag_max) -> dict:
@@ -505,7 +507,7 @@ class ClusteringExperiment(Experiment):
     def cluster(
         self,
         n_clu: int,
-        n_pcas: int = None,
+        n_pcas: int,
         kind: str = "kmeans",
         return_centers: bool = True,
     ) -> str | Tuple[xr.DataArray, str]:
@@ -522,7 +524,7 @@ class ClusteringExperiment(Experiment):
                 f"{kind} clustering not implemented. Options are kmeans and kmedoids"
             )
         picklepath = self.path.joinpath(
-            f"k{suffix}_{n_clu}_{self.midfix}_{self.season}_{self.weigh}.pkl"
+            f"k{suffix}_{n_clu}_{self.midfix}_{self.season}.pkl"
         )
         if picklepath.is_file():
             with open(picklepath, "rb") as handle:
@@ -540,7 +542,7 @@ class ClusteringExperiment(Experiment):
                 "lat": da.lat.values,
                 "lon": da.lon.values,
             }
-            centers = self.to_dataarray(da, n_pcas, centers, coords)
+            centers = self.to_dataarray(centers, da, n_pcas, coords)
         elif isinstance(results, KMedoids):
             centers = (
                 da.isel(time=results.medoids)
@@ -564,7 +566,7 @@ class ClusteringExperiment(Experiment):
             logging.warning("OPP flag will be ignored because n_pcas is set to None")
 
         output_path = self.path.joinpath(
-            f"som_{nx}_{ny}_{self.midfix}_{self.season}_{self.weigh}{'_OPP' if OPP else ''}.npy"
+            f"som_{nx}_{ny}_{self.midfix}_{self.season}{'_OPP' if OPP else ''}.npy"
         )
         if train_kwargs is None:
             train_kwargs = {}
