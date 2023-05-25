@@ -253,41 +253,6 @@ def apply_hotspells_mask_v2(hotspells: list, da: xr.DataArray, maxlen: int = Non
     return da_masked
 
 
-def compute_anomaly(
-    da: xr.DataArray,
-    return_clim: bool = False,
-    smooth_kmax: int = None,
-) -> (
-    xr.DataArray | Tuple[xr.DataArray, xr.DataArray]
-):  # https://github.com/pydata/xarray/issues/3575
-    """computes daily anomalies extracted using a (possibly smoothed) climatology
-
-    Args:
-        da (xr.DataArray):
-        return_clim (bool, optional): whether to also return the climatology (possibly smoothed). Defaults to False.
-        smooth_kmax (bool, optional): maximum k for fourier smoothing of the climatology. No smoothing if None. Defaults to None.
-
-    Returns:
-        anom (DataArray): _description_
-        clim (DataArray, optional): climatology
-    """
-    if len(da["time"]) == 0:
-        return da
-    gb = da.groupby("time.dayofyear")
-    clim = gb.mean(dim="time")
-    if smooth_kmax:
-        ft = xrft.fft(clim, dim="dayofyear")
-        ft[: int(len(ft) / 2) - smooth_kmax] = 0
-        ft[int(len(ft) / 2) + smooth_kmax :] = 0
-        clim = xrft.ifft(
-            ft, dim="freq_dayofyear", true_phase=True, true_amplitude=True
-        ).real.assign_coords(dayofyear=clim.dayofyear)
-    anom = (gb - clim).reset_coords("dayofyear", drop=True)
-    if return_clim:
-        return anom, clim  # when Im not using map_blocks
-    return anom
-
-
 def autocorrelation(path: Path, time_steps: int = 50) -> Path:
     ds = xr.open_dataset(path)
     name = path.parts[-1].split(".")[0]

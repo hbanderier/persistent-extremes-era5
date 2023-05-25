@@ -26,7 +26,43 @@ except ImportError:
     pass
 
 
-from definitions import NODE, DATADIR, SMALLNAME, DATERANGEPL, DATERANGEPL_EXT, LATBINS, cdo, degcos, degsin, compute_anomaly, setup_cdo, CIequal
+from definitions import NODE, DATADIR, SMALLNAME, DATERANGEPL, DATERANGEPL_EXT, LATBINS, cdo, degcos, degsin, setup_cdo, CIequal
+
+
+def compute_anomaly(
+    da: xr.DataArray,
+    return_clim: bool = False,
+    smooth_kmax: int = None,
+) -> (
+    xr.DataArray | Tuple[xr.DataArray, xr.DataArray]
+):  # https://github.com/pydata/xarray/issues/3575
+    """computes daily anomalies extracted using a (possibly smoothed) climatology
+
+    Args:
+        da (xr.DataArray):
+        return_clim (bool, optional): whether to also return the climatology (possibly smoothed). Defaults to False.
+        smooth_kmax (bool, optional): maximum k for fourier smoothing of the climatology. No smoothing if None. Defaults to None.
+
+    Returns:
+        anom (DataArray): _description_
+        clim (DataArray, optional): climatology
+    """
+    if len(da["time"]) == 0:
+        return da
+    gb = da.groupby("time.dayofyear")
+    clim = gb.mean(dim="time")
+    if smooth_kmax:
+        ft = xrft.fft(clim, dim="dayofyear")
+        ft[: int(len(ft) / 2) - smooth_kmax] = 0
+        ft[int(len(ft) / 2) + smooth_kmax :] = 0
+        clim = xrft.ifft(
+            ft, dim="freq_dayofyear", true_phase=True, true_amplitude=True
+        ).real.assign_coords(dayofyear=clim.dayofyear)
+    anom = (gb - clim).reset_coords("dayofyear", drop=True)
+    if return_clim:
+        return anom, clim  # when Im not using map_blocks
+    return anom
+
 
 @dataclass(init=False)
 class Experiment(object):
@@ -245,8 +281,9 @@ class Experiment(object):
         return da.groupby("time.dayofyear") + clim
 
 
-def compute_autocorrs(X: NDArray[Shape["*, *"], Float], lag_max: int, i_max: int) -> NDArray[Shape["*, *, *"], Float]:
+def compute_autocorrs(X: NDArray[Shape["*, *"], Float], lag_max: int) -> NDArray[Shape["*, *, *"], Float]:
     autocorrs = []
+    i_max = X.shape[1]
     for i in range(lag_max):
         autocorrs.append(
             np.cov(X[i:], np.roll(X, i, axis=0)[i:], rowvar=False)[
@@ -254,11 +291,6 @@ def compute_autocorrs(X: NDArray[Shape["*, *"], Float], lag_max: int, i_max: int
             ]
         )
     return np.asarray(autocorrs)
-
-
-def weighted_matmul(A: NDArray, B: NDArray, weights: NDArray) -> NDArray:
-    return ((A * weights[None, :]) @ B) / np.sum(weights) * weights.size
-
 
 @dataclass(init=False)
 class ClusteringExperiment(Experiment):
@@ -304,10 +336,11 @@ class ClusteringExperiment(Experiment):
         self,
         centers: NDArray[Shape["*, *"], Float],
         da: xr.DataArray,
-        n_pcas: int,
+        n_pcas: int = None,
         coords: dict | str = None,
     ) -> xr.DataArray:
-        centers = self.pca_inverse_transform(centers, n_pcas)
+        if n_pcas: # 0 pcas is also no transform
+            centers = self.pca_inverse_transform(centers, n_pcas)
         if coords is None:
             coords = 'mode'
         if isinstance(coords, str):
@@ -370,8 +403,12 @@ class ClusteringExperiment(Experiment):
         X = pca_results.inverse_transform(X)
         return X.reshape(X.shape[0], -1)
     
-    def _compute_opps_T1(self, X, n_pcas, lag_max) -> dict:
-        autocorrs = compute_autocorrs(X, lag_max, n_pcas)
+    def _compute_opps_T1(
+            self, 
+            X: NDArray, 
+            lag_max: int,
+        ) -> dict:
+        autocorrs = compute_autocorrs(X, lag_max)
         M = np.trapz(autocorrs + autocorrs.transpose((0, 2, 1)), axis=0)
 
         invC0 = linalg.inv(autocorrs[0])
@@ -387,8 +424,12 @@ class ClusteringExperiment(Experiment):
             "OPPs": OPPs,
         }
     
-    def _compute_opps_T2(self, X, n_pcas, lag_max) -> dict:
-        autocorrs = compute_autocorrs(X, lag_max, n_pcas)
+    def _compute_opps_T2(
+            self, 
+            X: NDArray, 
+            lag_max: int
+        ) -> dict:
+        autocorrs = compute_autocorrs(X, lag_max)
         C0sqrt = linalg.sqrtm(autocorrs[0])
         C0minushalf = linalg.inv(C0sqrt)
         basis = linalg.orth(C0minushalf)
@@ -411,7 +452,7 @@ class ClusteringExperiment(Experiment):
         def jac_norm0(x) -> NDArray[Shape["*"], Float]:
             return - 2 * x
         
-        Id = np.eye(n_pcas)
+        Id = np.eye(X.shape[1])
         proj = Id.copy()
         OPPs = []
         T2s = []
@@ -446,7 +487,8 @@ class ClusteringExperiment(Experiment):
         if type not in [1, 2]:
             raise ValueError(f'Wrong OPP type, pick 1 or 2')
         X, da = self.prepare_for_clustering()
-        X = self.pca_transform(X, n_pcas)
+        if n_pcas:
+            X = self.pca_transform(X, n_pcas)
         X = X.reshape((X.shape[0], -1))
         n_pcas = X.shape[1]
         opp_path: Path = self.path.joinpath(
@@ -614,6 +656,30 @@ class ClusteringExperiment(Experiment):
             centers = self.opp_inverse_transform(centers, n_pcas=n_pcas)
         centers = self.to_dataarray(centers, da, n_pcas, coords)
         return net, centers
+    
+
+def project_onto_clusters(X: NDArray | xr.DataArray, centers: NDArray | xr.DataArray, weighs:tuple = None) -> NDArray | xr.DataArray:
+    
+    if isinstance(X, NDArray): 
+        if isinstance(centers, xr.DataArray): # always cast to type of X
+            centers = centers.values
+        if weighs is not None:
+            X = np.swapaxes(np.swapaxes(X, weighs[0], -1) * weighs[1], -1, weighs[0]) # https://stackoverflow.com/questions/30031828/multiply-numpy-ndarray-with-1d-array-along-a-given-axis
+        return np.tensordot(X, centers.T, axes=X.ndim - 1) # cannot weigh
+        
+    if isinstance(X, xr.DataArray):
+        if isinstance(centers, NDArray):
+            if centers.ndim == 4:
+                centers = centers.reshape((centers.shape[0] * centers.shape[1], centers.shape[2], centers.shape[3]))
+            coords = dict(centers=np.arange(centers.shape[0]), **{key: val for key, val in X.coords if key != 'time'})
+            centers = xr.DataArray(centers, coords=coords)
+        try:
+            weighs = np.sqrt(degcos(X.lat))
+            X *= weighs
+            denominator = np.sum(weighs.values)
+        except AttributeError:
+            denominator = 1
+        return X.dot(centers) / denominator    
 
 
 def meandering(lines):
