@@ -1,16 +1,18 @@
-import contourpy
+from contourpy import contour_generator
 import numpy as np
 import tqdm
 from scipy.stats import gaussian_kde
+from scipy.interpolate import LinearNDInterpolator
 from xarray import DataArray
 from itertools import product
-from typing import Any, Optional, Tuple, Union, Iterable
+from typing import Any, Optional, Sequence, Tuple, Union, Iterable
 from nptyping import Float, Int, NDArray, Object, Shape
 
 import matplotlib as mpl
 from matplotlib import path as mpath
 from matplotlib import pyplot as plt
 from matplotlib import ticker as mticker
+from matplotlib.patches import PathPatch
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 from matplotlib.cm import ScalarMappable
@@ -300,7 +302,7 @@ class Clusterplot:
             ax.set_xlim([self.minlon, self.maxlon])
             ax.set_ylim([self.minlat, self.maxlat])
             ax.add_feature(COASTLINE)
-            ax.add_feature(BORDERS)
+            # ax.add_feature(BORDERS)
 
     def _add_gridlines(self, step: int | tuple = None) -> None:
         for ax in self.axes:
@@ -578,7 +580,71 @@ class Clusterplot:
         if stippling:
             self.add_stippling(da, mask, to_plot)
         return im
+    
+    def cluster_on_fig(
+        self, 
+        coords: NDArray, 
+        clu_labs: NDArray,
+        cmap: str | Colormap = None,
+    ) -> None:
+        unique_labs = np.unique(clu_labs)
+        sym = np.any(unique_labs < 0)
 
+        if cmap is None:
+            cmap = 'PiYG' if sym else 'Greens'
+        if isinstance(cmap, str):
+            cmap = mpl.colormaps[cmap]
+
+        nabove = np.sum(unique_labs > 0)
+        if sym:
+            colors = np.linspace(1., 0.66, nabove)
+            colors = [1 - colors, [0.5], colors]
+        else:
+            colors = np.linspace(1., 0.33, nabove)
+            colors = [[0.5], colors]
+        colors = np.concatenate(colors)
+        colors = cmap(colors)
+        
+        xmin, ymin = self.axes[0].get_position().xmin, self.axes[0].get_position().ymin
+        xmax, ymax = self.axes[-1].get_position().xmax, self.axes[-1].get_position().ymax
+        x = np.linspace(xmin, xmax, 200)
+        y = np.linspace(ymin, ymax, 200)
+        newmin, newmax = np.asarray([xmin, ymin]), np.asarray([xmax, ymax])
+        dx = coords[10, 0] - coords[0, 0]
+        dy = (coords[2, 1] - coords[0, 1]) / 2
+        for coord, val in zip(coords, clu_labs):
+            newcs = [[coord[0] + sgnx * dx / 2.2, coord[1] + sgny * dy / 2.2] for sgnx, sgny in product([-1, 0, 1], [-1, 0, 1])]
+            coords = np.append(coords, newcs, axis=0)
+            clu_labs = np.append(clu_labs, [val] * len(newcs))
+        min, max = np.amin(coords, axis=0), np.amax(coords, axis=0)
+        reduced_coords = (coords - min[None, :]) / (max - min)[None, :] * (newmax - newmin)[None, :] + newmin[None, :]
+        for i, lab in enumerate(np.unique(clu_labs)):
+            interp = LinearNDInterpolator(reduced_coords, clu_labs == lab)
+            r = interp(*np.meshgrid(x, y)) 
+
+            if lab == 0:
+                iter = contour_generator(x, y, r).filled(0.6, 1)[0]
+                ls = 'none'
+                fc = 'black'
+                alpha = 0.2
+                ec = 'none'
+            else:
+                iter = contour_generator(x, y, r).lines(0.6)
+                ls = 'solid' if lab >= 0 else 'dashed'
+                alpha = 1
+                fc = 'none' 
+                ec = colors[i]
+            
+            for p in iter:
+                self.fig.add_artist(PathPatch(
+                    mpath.Path(p), 
+                    fc=fc,
+                    alpha=alpha,
+                    ec=ec, 
+                    lw=6,
+                    ls=ls,
+                ))
+        
 
 def cdf(timeseries: Union[DataArray, NDArray]) -> Tuple[NDArray, NDArray]:
     """Computes the cumulative distribution function of a 1D DataArray

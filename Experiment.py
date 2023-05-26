@@ -26,7 +26,7 @@ except ImportError:
     pass
 
 
-from definitions import NODE, DATADIR, SMALLNAME, DATERANGEPL, DATERANGEPL_EXT, LATBINS, cdo, degcos, degsin, setup_cdo, CIequal
+from definitions import NODE, DATADIR, SMALLNAME, DATERANGEPL, DATERANGEPL_EXT, LATBINS, cdo, degcos, degsin, load_pickle, setup_cdo, CIequal
 
 
 def compute_anomaly(
@@ -387,7 +387,7 @@ class ClusteringExperiment(Experiment):
         pca_path = self.compute_pcas(n_pcas)
         with open(pca_path, "rb") as handle:
             pca_results = pkl.load(handle)
-        X = pca_results.transform(X)
+        X = pca_results.transform(X)[:, :n_pcas]
         return X
     
     def pca_inverse_transform(
@@ -497,9 +497,9 @@ class ClusteringExperiment(Experiment):
         results = None
         if not opp_path.is_file():
             if type == 1:
-                results = self._compute_opps_T1(X, n_pcas, lag_max)
+                results = self._compute_opps_T1(X, lag_max)
             if type == 2:
-                results = self._compute_opps_T2(X, n_pcas, lag_max)
+                results = self._compute_opps_T2(X, lag_max)
             with open(opp_path, "wb") as handle:
                 pkl.dump(results, handle)
         if results is None:
@@ -647,8 +647,7 @@ class ClusteringExperiment(Experiment):
         logging.debug(centers)
         logging.debug(centers.shape)
         coords = {
-            "x": np.arange(nx),
-            "y": np.arange(ny),
+            "node": np.arange(nx * ny),
             "lat": da.lat.values,
             "lon": da.lon.values,
         }
@@ -681,6 +680,21 @@ def project_onto_clusters(X: NDArray | xr.DataArray, centers: NDArray | xr.DataA
             denominator = 1
         return X.dot(centers) / denominator    
 
+def cluster_from_two_projs(X1: NDArray, X2: NDArray = None, cutoff: int = 3) -> NDArray:
+    X1 = X1[:, :cutoff]
+    if X2 is not None:
+        X2 = X2[:, :cutoff]
+        X = np.empty((X1.shape[0], X1.shape[1] + X2.shape[1]))
+        X[:, ::2] = X1
+        X[:, 1::2] = X2
+    else:
+        X = X1
+    sigma = np.std(X, ddof=1)
+    max_weight = np.argmax(np.abs(X), axis=1)
+    Xmax = np.take_along_axis(X, max_weight[:, None], axis=1)
+    sign = np.sign(Xmax)
+    sign[np.abs(Xmax) < sigma] = 0
+    return sign.flatten() * (1 + max_weight)
 
 def meandering(lines):
     m = 0
