@@ -5,7 +5,7 @@ import glob
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
-from typing import Any, Optional, Tuple, Iterable
+from typing import Any, Mapping, Optional, Tuple, Iterable
 
 import numpy as np
 from nptyping import Float, Int, NDArray, Object, Shape
@@ -29,10 +29,42 @@ except ImportError:
 from definitions import NODE, DATADIR, SMALLNAME, DATERANGEPL, DATERANGEPL_EXT, LATBINS, cdo, degcos, degsin, load_pickle, setup_cdo, CIequal
 
 
+def pad_wrap(da: xr.DataArray, dim: str) -> bool:
+    resolution = da[dim][1] - da[dim][0]
+    if dim in ['lon', 'longitude']:
+        return da[dim][-1] <= 360 and da[dim][-1] >= 360 - resolution and da[dim][0] == 0.
+    return dim == 'dayofyear'
+
+
+def window_smoothing(da: xr.DataArray, dim: str, winsize: int) -> xr.DataArray:
+    halfwinsize = int(np.ceil(winsize / 2))
+    if pad_wrap(da, dim):
+        da = da.pad({dim: halfwinsize}, mode='wrap')
+        newda = da.rolling({dim: winsize}, center=True).mean()
+        newda = newda.isel({dim: slice(halfwinsize, -halfwinsize)})
+    else:
+        newda = da.rolling({dim: winsize}, center=True, min_periods=1).mean()
+    newda.attrs = da.attrs
+    return newda
+    
+
+def fft_smoothing(da: xr.DataArray, dim: str, winsize: int) -> xr.DataArray:
+    if dim == 'time':
+        winsize *= 24 * 3600
+    ft = xrft.fft(da, dim=dim)
+    ft[np.abs(ft[f'freq_{dim}']) > 1 / winsize] = 0
+    newda = xrft.ifft(
+        ft, dim=f"freq_{dim}", true_phase=True, true_amplitude=True
+    ).real.assign_coords(da.coords)
+    newda.attrs = da.attrs
+    return newda
+
+    
 def compute_anomaly(
     da: xr.DataArray,
     return_clim: bool = False,
-    smooth_kmax: int = None,
+    smooth_type: str = 'window',
+    winsize: int = None,
 ) -> (
     xr.DataArray | Tuple[xr.DataArray, xr.DataArray]
 ):  # https://github.com/pydata/xarray/issues/3575
@@ -51,17 +83,30 @@ def compute_anomaly(
         return da
     gb = da.groupby("time.dayofyear")
     clim = gb.mean(dim="time")
-    if smooth_kmax:
-        ft = xrft.fft(clim, dim="dayofyear")
-        ft[: int(len(ft) / 2) - smooth_kmax] = 0
-        ft[int(len(ft) / 2) + smooth_kmax :] = 0
-        clim = xrft.ifft(
-            ft, dim="freq_dayofyear", true_phase=True, true_amplitude=True
-        ).real.assign_coords(dayofyear=clim.dayofyear)
+    if smooth_type == 'lowpass':
+        if winsize is None:
+            winsize = 90
+        clim = fft_smoothing(clim, 'dayofyear', winsize)
+    elif smooth_type == 'window':
+        if winsize is None:
+            winsize = 90
+        clim = window_smoothing(clim, 'dayofyear', winsize)
     anom = (gb - clim).reset_coords("dayofyear", drop=True)
     if return_clim:
         return anom, clim  # when Im not using map_blocks
     return anom
+        
+        
+def smooth(
+    da: xr.DataArray,
+    smooth_map: Mapping,
+) -> xr.DataArray:
+    for dim, (smooth_type, winsize) in smooth_map.items():
+        if smooth_type.lower() in ['lowpass', 'fft', 'fft_smoothing']:
+            da = fft_smoothing(da, dim, winsize)
+        elif smooth_type.lower() in ['window', 'window_smoothing']:
+            da = window_smoothing(da, dim, winsize)
+    return da
 
 
 @dataclass(init=False)
@@ -90,7 +135,6 @@ class Experiment(object):
         maxlon: Optional[int | float] = None,
         minlat: Optional[int | float] = None,
         maxlat: Optional[int | float] = None,
-        smooth: bool = False,
     ) -> None:
         self.dataset = dataset
         self.variable = variable
@@ -126,7 +170,7 @@ class Experiment(object):
         self.lon = None
         self.lat = None
         self.coslat = None
-        self.copy_content(smooth)
+        self.copy_content()
 
     def ifile(self, suffix: str = "") -> Path:
         underscore = "" if suffix == "" else "_"
@@ -179,46 +223,28 @@ class Experiment(object):
             da.attrs["units"] = "m"
         return da
 
-    def detrend(self, n_workers: int = 8) -> None:
+    def detrend(self, n_workers: int = 16, **kwargs) -> None:
         da = self.open_da(chunks={"time": -1, "lon": 30, "lat": 30})
-        anom = da.map_blocks(compute_anomaly, template=da).compute(n_workers=n_workers)
+        anom = da.map_blocks(compute_anomaly, template=da, kwargs=kwargs).compute(n_workers=n_workers)
         anom.to_netcdf(self.ofile("anomaly"))
         anom = anom.map_blocks(xrft.detrend, template=anom, args=["time", "linear"]).compute(n_workers=n_workers)
         anom.to_netcdf(self.ofile("detrended"))
 
-    def get_winsize(self, da: xr.DataArray) -> Tuple[float, float, float]:
-        resolution = (da.lon[1] - da.lon[0]).values.item()
-        winsize = int(60 / resolution)
-        halfwinsize = int(winsize / 2)
-        return resolution, winsize, halfwinsize
-
-    def smooth(self) -> None:
-        if self.region == "dailymean":
-            da = self.open_da()
-            resolution, winsize, halfwinsize = self.get_winsize(da)
-            da = da.pad(lon=halfwinsize, mode="wrap")
+    def smooth(self, smooth_map: Mapping, suffix: str = '') -> None:
+        da = self.open_da(suffix)
+        da = smooth(da, smooth_map)
+        if suffix != '':
+            suffix = f'{suffix}_smooth'
         else:
-            da = self.open_da("bigger")
-            resolution, winsize, halfwinsize = self.get_winsize(da)
-        da = da.rolling(lon=winsize, center=True).mean()[:, :, halfwinsize:-halfwinsize]
-        lon = da.lon
-        da_fft = xrft.fft(da, dim="time")
-        da_fft[np.abs(da_fft.freq_time) > 1 / 10 / 24 / 3600] = 0
-        da = (
-            xrft.ifft(da_fft, dim="freq_time", true_phase=True, true_amplitude=True)
-            .real.assign_coords(time=da.time)
-            .rename(self.smallname)
-        )
-        da.attrs["unit"] = "m/s"
-        da["lon"] = lon
-        da.to_netcdf(self.ofile("smooth"))
-
-    def copy_content(self, smooth: bool = False):
+            suffix = 'smooth'
+        da.to_netcdf(self.ofile(suffix))
+        
+    def copy_content(self) -> None:
         if not self.path.is_dir():
             os.mkdir(self.path)
         ifile = self.ifile("")
         ofile = self.ofile("")
-        if not ofile.is_file() and (not smooth and not self.region == "dailymean"):
+        if not ofile.is_file() and not self.region == "dailymean":
             setup_cdo()
             cdo.sellonlatbox(
                 self.minlon,
@@ -228,29 +254,8 @@ class Experiment(object):
                 input=ifile.as_posix(),
                 output=ofile.as_posix(),
             )
-        elif not ofile.is_file() and smooth:
-            setup_cdo()
-            ofile_bigger = self.ofile("bigger")
-            cdo.sellonlatbox(
-                self.minlon - 30,
-                self.maxlon + 30,
-                self.minlat,
-                self.maxlat,
-                input=ifile.as_posix(),
-                output=ofile_bigger.as_posix(),
-            )
-            cdo.sellonlatbox(
-                self.minlon,
-                self.maxlon,
-                self.minlat,
-                self.maxlat,
-                input=ofile_bigger.as_posix(),
-                output=ofile.as_posix(),
-            )
-        to_iterate = ["detrended", "anomaly"]
-        if smooth:
-            to_iterate.append("smooth")
-        for modified in to_iterate:
+        
+        for modified in ["detrended", "anomaly"]:
             ifile = self.ifile(modified)
             ofile = self.ofile(modified)
             if ofile.is_file():
@@ -266,19 +271,7 @@ class Experiment(object):
                     output=ofile.as_posix(),
                 )
                 continue
-            if modified in ["detrended", "anomaly"]:
-                self.detrend()
-            else:
-                self.smooth()
-
-    def to_absolute(
-        self,
-        da: xr.DataArray,
-    ) -> (
-        xr.DataArray
-    ):  # TODO : deal with detrended anomalies, TODO : deal with other types of climatologies
-        clim = self.open_da("climatology")
-        return da.groupby("time.dayofyear") + clim
+            self.detrend()
 
 
 def compute_autocorrs(X: NDArray[Shape["*, *"], Float], lag_max: int) -> NDArray[Shape["*, *, *"], Float]:
