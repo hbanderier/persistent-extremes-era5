@@ -44,7 +44,7 @@ def compute_anomaly(
         smooth_kmax (bool, optional): maximum k for fourier smoothing of the climatology. No smoothing if None. Defaults to None.
 
     Returns:
-        anom (DataArray): _description_
+        anom (DataArray): anomaly
         clim (DataArray, optional): climatology
     """
     if len(da["time"]) == 0:
