@@ -22,14 +22,21 @@ pf = platform.platform()
 if pf.find("cray") >= 0:
     NODE = "DAINT"
     DATADIR = "/scratch/snx3000/hbanderi/data/persistent"
+    N_WORKERS=16
+    MEMORY_LIMIT='4GiB'
 elif platform.node()[:4] == "clim":
     NODE = "CLIM"
     DATADIR = "/scratch2/hugo"
+    N_WORKERS=8
+    MEMORY_LIMIT='4GiB'
 elif pf.find("el7") >= 0:  # find better later
     NODE = "UBELIX"
     DATADIR = "/storage/scratch/users/hb22g102"
     os.environ["CDO"] = "/storage/homefs/hb22g102/mambaforge/envs/env11/bin/cdo"
-CLIMSTOR = "/mnt/climstor/ecmwf/era5-new/raw"
+    N_WORKERS=8
+    MEMORY_LIMIT='4GiB'
+    
+CLIMSTOR = "/mnt/climstor/ecmwf/era5/raw"
 
 DATERANGEPL = pd.date_range("19590101", "20211231")
 YEARSPL = np.unique(DATERANGEPL.year)
@@ -70,13 +77,6 @@ RADIUS = 6.371e6  # m
 OMEGA = 7.2921e-5  # rad.s-1
 KAPPA = 0.2854
 R_SPECIFIC_AIR = 287.0500676
-
-cdo = None
-
-def setup_cdo() -> None:
-    global cdo 
-    if not cdo:
-        cdo = Cdo()
 
 
 def filenamesml(

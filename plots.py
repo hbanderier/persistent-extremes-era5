@@ -275,7 +275,7 @@ class Clusterplot:
             projection = ccrs.LambertConformal(
                 central_longitude=self.central_longitude,
             )
-            ratio = 1
+            ratio = .6 * self.nrow / (self.ncol + (0.5 if honeycomb else 0))
             self.boundary = make_boundary_path(*region)
         else:
             projection = ccrs.PlateCarree()
@@ -295,14 +295,12 @@ class Clusterplot:
                 self.ncol,
                 figsize=(6.5 * self.ncol, 6.5 * self.ncol * ratio),
                 subplot_kw={"projection": projection},
-                constrained_layout=True,
             )
         self.axes = np.atleast_1d(self.axes).flatten()
         for ax in self.axes:
-            ax.set_xlim([self.minlon, self.maxlon])
-            ax.set_ylim([self.minlat, self.maxlat])
+            ax.set_extent([self.minlon, self.maxlon, self.minlat, self.maxlat], crs=ccrs.PlateCarree())
             ax.add_feature(COASTLINE)
-            # ax.add_feature(BORDERS)
+            # ax.add_feature(BORDERS, transform=ccrs.PlateCarree())
 
     def _add_gridlines(self, step: int | tuple = None) -> None:
         for ax in self.axes:
@@ -355,7 +353,7 @@ class Clusterplot:
         linestyles: list | str = None,
         **kwargs,
     ) -> None:
-        assert len(to_plot) == len(self.axes)
+        assert len(to_plot) <= len(self.axes)
 
         lon = to_plot[0]["lon"].values
         lat = to_plot[0]["lat"].values
@@ -413,7 +411,7 @@ class Clusterplot:
         titles: Iterable = None,
         **kwargs,
     ) -> ScalarMappable:
-        assert len(to_plot) == len(self.axes)
+        assert len(to_plot) <= len(self.axes)
 
         lon = to_plot[0]["lon"].values
         lat = to_plot[0]["lat"].values

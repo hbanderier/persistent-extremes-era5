@@ -5,7 +5,7 @@ import glob
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
-from typing import Any, Mapping, Optional, Tuple, Iterable
+from typing import Any, Mapping, Optional, Sequence, Tuple, Iterable
 
 import numpy as np
 from nptyping import Float, Int, NDArray, Object, Shape
@@ -26,7 +26,15 @@ except ImportError:
     pass
 
 
-from definitions import NODE, DATADIR, SMALLNAME, DATERANGEPL, DATERANGEPL_EXT, LATBINS, cdo, degcos, degsin, load_pickle, setup_cdo, CIequal
+from definitions import NODE, N_WORKERS, MEMORY_LIMIT, DATADIR, SMALLNAME, DATERANGEPL, DATERANGEPL_EXT, LATBINS, degcos, degsin, load_pickle, CIequal, Cdo
+
+
+cdo = None
+
+def setup_cdo() -> None:
+    global cdo 
+    if not cdo:
+        cdo = Cdo()
 
 
 def pad_wrap(da: xr.DataArray, dim: str) -> bool:
@@ -51,20 +59,40 @@ def window_smoothing(da: xr.DataArray, dim: str, winsize: int) -> xr.DataArray:
 def fft_smoothing(da: xr.DataArray, dim: str, winsize: int) -> xr.DataArray:
     if dim == 'time':
         winsize *= 24 * 3600
+    name = da.name
+    newchunks = {di: 30 for di in da.dims}
+    newchunks[dim] = -1
+    da = da.chunk(newchunks)
     ft = xrft.fft(da, dim=dim)
     ft[np.abs(ft[f'freq_{dim}']) > 1 / winsize] = 0
     newda = xrft.ifft(
         ft, dim=f"freq_{dim}", true_phase=True, true_amplitude=True
-    ).real.assign_coords(da.coords)
+    ).real.assign_coords(da.coords).rename(name)
     newda.attrs = da.attrs
     return newda
 
-    
+
+def smooth(
+    da: xr.DataArray,
+    smooth_map: Mapping,
+) -> xr.DataArray:
+    for dim, value in smooth_map.items():
+        if dim == 'detrended':
+            if value:
+                da = da.map_blocks(xrft.detrend, template=da, args=["time", "linear"])
+            continue
+        smooth_type, winsize = value
+        if smooth_type.lower() in ['lowpass', 'fft', 'fft_smoothing']:
+            da = fft_smoothing(da, dim, winsize)
+        elif smooth_type.lower() in ['win', 'window', 'window_smoothing']:
+            da = window_smoothing(da, dim, winsize)
+    return da
+
+
 def compute_anomaly(
     da: xr.DataArray,
-    return_clim: bool = False,
-    smooth_type: str = 'window',
-    winsize: int = None,
+    clim_type: str,
+    smoothing: Mapping,
 ) -> (
     xr.DataArray | Tuple[xr.DataArray, xr.DataArray]
 ):  # https://github.com/pydata/xarray/issues/3575
@@ -81,32 +109,34 @@ def compute_anomaly(
     """
     if len(da["time"]) == 0:
         return da
-    gb = da.groupby("time.dayofyear")
+    if clim_type.lower() in ['doy', 'dayofyear']:
+        coordname = 'dayofyear'
+    else:
+        raise NotImplementedError()
+    gb = da.groupby(f"time.{coordname}")
     clim = gb.mean(dim="time")
-    if smooth_type == 'lowpass':
-        if winsize is None:
-            winsize = 90
-        clim = fft_smoothing(clim, 'dayofyear', winsize)
-    elif smooth_type == 'window':
-        if winsize is None:
-            winsize = 90
-        clim = window_smoothing(clim, 'dayofyear', winsize)
-    anom = (gb - clim).reset_coords("dayofyear", drop=True)
-    if return_clim:
-        return anom, clim  # when Im not using map_blocks
-    return anom
+    clim = smooth(clim, smoothing)
+    anom = (gb - clim).reset_coords(coordname, drop=True)
+    return anom, clim 
+
         
-        
-def smooth(
-    da: xr.DataArray,
-    smooth_map: Mapping,
-) -> xr.DataArray:
-    for dim, (smooth_type, winsize) in smooth_map.items():
-        if smooth_type.lower() in ['lowpass', 'fft', 'fft_smoothing']:
-            da = fft_smoothing(da, dim, winsize)
-        elif smooth_type.lower() in ['window', 'window_smoothing']:
-            da = window_smoothing(da, dim, winsize)
-    return da
+
+def unpack_smooth_map(smooth_map: Mapping | Sequence) -> str:
+    strlist = []
+    for dim, value in smooth_map.items():
+        if dim == 'detrended':
+            if smooth_map['detrended']:
+                strlist.append('detrended')
+            continue
+        smooth_type, winsize = value
+        if dim == 'dayofyear':
+            dim = 'doy'
+        if isinstance(winsize, float):
+            winsize = f'{winsize:.2f}'
+        elif isinstance(winsize, int):
+            winsize = str(winsize)
+        strlist.append(''.join((dim, smooth_type, winsize)))
+    return '_'.join(strlist)
 
 
 @dataclass(init=False)
@@ -119,10 +149,9 @@ class Experiment(object):
     maxlon: int
     minlat: int
     maxlat: int
-    lon: NDArray
-    lat: NDArray
-    coslat: NDArray
-    path: str
+    base_path: Path
+    clim_path: Path
+    path: Path
 
     def __init__(
         self,
@@ -135,6 +164,9 @@ class Experiment(object):
         maxlon: Optional[int | float] = None,
         minlat: Optional[int | float] = None,
         maxlat: Optional[int | float] = None,
+        clim_type: str = None,
+        clim_smoothing: Mapping = None,
+        smoothing: Mapping = None,
     ) -> None:
         self.dataset = dataset
         self.variable = variable
@@ -166,35 +198,78 @@ class Experiment(object):
                 )
             else:
                 raise ValueError(f"{region=}, wrong specifier")
-        self.path = Path(DATADIR, self.dataset, self.variable, self.level, self.region)
-        self.lon = None
-        self.lat = None
-        self.coslat = None
-        self.copy_content()
+            
+        if clim_smoothing is not None and clim_type is None:
+            raise ValueError('clim_smoothing is specified so you should specify and clim_type')
+        
+        if clim_type is None:
+            clim_type = 'none'
+            
+        if clim_smoothing is None:
+            clim_smoothing = {}    
+        
+        if smoothing is None:
+            smoothing = {}
+            
+        self.base_path = Path(DATADIR, self.dataset, self.variable, self.level, self.region)
+        self.clim_path = self.base_path.joinpath(clim_type + '_' + unpack_smooth_map(clim_smoothing))
+        self.path = self.clim_path.joinpath(unpack_smooth_map(smoothing)) # may be same as clim_path if no smoothing or detrending
+        self.path.mkdir(parents=True, exist_ok=True)
 
-    def ifile(self, suffix: str = "") -> Path:
-        underscore = "" if suffix == "" else "_"
-        joinpath = f"{self.smallname}{underscore}{suffix}.nc"
-        return self.path.parent.joinpath("dailymean").joinpath(joinpath)
+        if not self.file().is_file() and not self.region == 'dailymean':
+            setup_cdo()
+            ifile = self.orig_file()
+            ofile = self.file()
+            cdo.sellonlatbox(
+                self.minlon,
+                self.maxlon,
+                self.minlat,
+                self.maxlat,
+                input=ifile.as_posix(),
+                output=ofile.as_posix(),
+            ) 
+        if not self.file('clim').is_file() or not self.file('anom').is_file():
+            self.compute_anomaly(clim_type, clim_smoothing, smoothing)
+        # self.copy_content()
 
-    def ofile(self, suffix: str = "") -> Path:
-        underscore = "" if suffix == "" else "_"
-        joinpath = f"{self.smallname}{underscore}{suffix}.nc"
-        return self.path.joinpath(joinpath)
+    def orig_file(self) -> Path:
+        joinpath = f"{self.smallname}.nc"
+        return self.base_path.parent.joinpath("dailymean").joinpath(joinpath)
+
+    def file(self, which: str = "") -> Path:
+        if which.lower() in ['', 'absolute', 'abs']:
+            return self.base_path.joinpath(f'{self.smallname}.nc')
+        if which.lower() in ['clim', 'climatology']:
+            return self.clim_path.joinpath(f'{self.smallname}_clim.nc')
+        if which.lower() in ['anom', 'anomaly', 'detrended']:
+            return self.path.joinpath(f'{self.smallname}_anom.nc')
+
+    def compute_anomaly(
+        self, 
+        clim_type: str = 'none', 
+        clim_smoothing: Mapping = None,
+        smoothing: Mapping = None,
+    ) -> None:
+        da = self.open_da(chunks={"time": -1, "lon": 30, "lat": 30})
+        if clim_type == 'none' and not self.file('anom').is_file():
+            anom = da
+        else:
+            anom, clim = compute_anomaly(da, clim_type, clim_smoothing)
+            clim.compute(n_workers=N_WORKERS, memory_limit=MEMORY_LIMIT)
+            clim.to_netcdf(self.file('clim').as_posix())
+            del clim
+        anom = smooth(anom, smoothing).compute(n_workers=N_WORKERS, memory_limit=MEMORY_LIMIT)
+        ofile = self.file('anom')
+        anom.to_netcdf(ofile.as_posix())
 
     def open_da(
-        self, suffix: str = "", season: list | str | None = None, **kwargs
+        self, which: str = "", season: list | str | None = None, **kwargs
     ) -> xr.DataArray:
-        da = xr.open_dataset(self.ofile(suffix), **kwargs)[self.smallname]
+        da = xr.open_dataset(self.file(which), **kwargs)[self.smallname]
         try:
             da = da.rename({"longitude": "lon", "latitude": "lat"})
         except ValueError:
             pass
-
-        if self.lon is None or self.lat is None or self.coslat is None:
-            self.lon = da.lon.values
-            self.lat = da.lat.values
-            self.coslat = degcos(np.meshgrid(np.ones(len(self.lon)), self.lat)[1])
         
         for daterange in (DATERANGEPL, DATERANGEPL_EXT):
             if len(da.time) == len(daterange):
@@ -222,57 +297,7 @@ class Experiment(object):
             da /= co.g
             da.attrs["units"] = "m"
         return da
-
-    def detrend(self, n_workers: int = 16, **kwargs) -> None:
-        da = self.open_da(chunks={"time": -1, "lon": 30, "lat": 30})
-        anom = da.map_blocks(compute_anomaly, template=da, kwargs=kwargs).compute(n_workers=n_workers)
-        anom.to_netcdf(self.ofile("anomaly"))
-        anom = anom.map_blocks(xrft.detrend, template=anom, args=["time", "linear"]).compute(n_workers=n_workers)
-        anom.to_netcdf(self.ofile("detrended"))
-
-    def smooth(self, smooth_map: Mapping, suffix: str = '') -> None:
-        da = self.open_da(suffix)
-        da = smooth(da, smooth_map)
-        if suffix != '':
-            suffix = f'{suffix}_smooth'
-        else:
-            suffix = 'smooth'
-        da.to_netcdf(self.ofile(suffix))
-        
-    def copy_content(self) -> None:
-        if not self.path.is_dir():
-            os.mkdir(self.path)
-        ifile = self.ifile("")
-        ofile = self.ofile("")
-        if not ofile.is_file() and not self.region == "dailymean":
-            setup_cdo()
-            cdo.sellonlatbox(
-                self.minlon,
-                self.maxlon,
-                self.minlat,
-                self.maxlat,
-                input=ifile.as_posix(),
-                output=ofile.as_posix(),
-            )
-        
-        for modified in ["detrended", "anomaly"]:
-            ifile = self.ifile(modified)
-            ofile = self.ofile(modified)
-            if ofile.is_file():
-                continue
-            if ifile.is_file():
-                setup_cdo()
-                cdo.sellonlatbox(
-                    self.minlon,
-                    self.maxlon,
-                    self.minlat,
-                    self.maxlat,
-                    input=ifile.as_posix(),
-                    output=ofile.as_posix(),
-                )
-                continue
-            self.detrend()
-
+    
 
 def compute_autocorrs(X: NDArray[Shape["*, *"], Float], lag_max: int) -> NDArray[Shape["*, *, *"], Float]:
     autocorrs = []
@@ -285,11 +310,65 @@ def compute_autocorrs(X: NDArray[Shape["*, *"], Float], lag_max: int) -> NDArray
         )
     return np.asarray(autocorrs)
 
+
+def project_onto_clusters(X: NDArray | xr.DataArray, centers: NDArray | xr.DataArray, weighs:tuple = None) -> NDArray | xr.DataArray:
+    
+    if isinstance(X, NDArray): 
+        if isinstance(centers, xr.DataArray): # always cast to type of X
+            centers = centers.values
+        if weighs is not None:
+            X = np.swapaxes(np.swapaxes(X, weighs[0], -1) * weighs[1], -1, weighs[0]) # https://stackoverflow.com/questions/30031828/multiply-numpy-ndarray-with-1d-array-along-a-given-axis
+        return np.tensordot(X, centers.T, axes=X.ndim - 1) # cannot weigh
+        
+    if isinstance(X, xr.DataArray):
+        if isinstance(centers, NDArray):
+            if centers.ndim == 4:
+                centers = centers.reshape((centers.shape[0] * centers.shape[1], centers.shape[2], centers.shape[3]))
+            coords = dict(centers=np.arange(centers.shape[0]), **{key: val for key, val in X.coords if key != 'time'})
+            centers = xr.DataArray(centers, coords=coords)
+        try:
+            weighs = np.sqrt(degcos(X.lat))
+            X *= weighs
+            denominator = np.sum(weighs.values)
+        except AttributeError:
+            denominator = 1
+        return X.dot(centers) / denominator    
+
+
+def cluster_from_projs(X1: NDArray, X2: NDArray = None, cutoff: int = None, neg: bool = True) -> NDArray:
+    if cutoff is None:
+        if X2 is None:
+            cutoff = X1.shape[1]
+        else:
+            cutoff = min(X1.shape[1], X2.shape[1])
+    X1 = X1[:, :cutoff]
+    if X2 is not None:
+        X2 = X2[:, :cutoff]
+        X = np.empty((X1.shape[0], X1.shape[1] + X2.shape[1]))
+        X[:, ::2] = X1
+        X[:, 1::2] = X2
+    else:
+        X = X1
+    sigma = np.std(X, ddof=1)
+    if neg:
+        max_weight = np.argmax(np.abs(X), axis=1)
+        Xmax = np.take_along_axis(X, max_weight[:, None], axis=1)
+        sign = np.sign(Xmax)
+    else:
+        max_weight = np.argmax(X, axis=1)
+        Xmax = np.take_along_axis(X, max_weight[:, None], axis=1)
+        sign = np.ones(Xmax.shape)
+    sign[np.abs(Xmax) < sigma] = 0
+    return sign.flatten() * (1 + max_weight)
+
+
 @dataclass(init=False)
 class ClusteringExperiment(Experiment):
     midfix: str = "anomaly"
     season: list | str = None
-
+    inner_norm: int
+    filename: str
+    
     def __init__(
         self,
         dataset: str,
@@ -301,9 +380,13 @@ class ClusteringExperiment(Experiment):
         maxlon: Optional[int | float] = None,
         minlat: Optional[int | float] = None,
         maxlat: Optional[int | float] = None,
-        smooth: bool = False,
         midfix: str = "anomaly",
         season: list | str = None,
+        clim_type: str = None,
+        clim_smoothing: Mapping = None,
+        smoothing: Mapping = None,
+        inner_norm: int = None,
+        
     ) -> None:
         super().__init__(
             dataset,
@@ -315,40 +398,85 @@ class ClusteringExperiment(Experiment):
             maxlon,
             minlat,
             maxlat,
-            smooth,
+            clim_type,
+            clim_smoothing,
+            smoothing,
         )
         self.midfix = midfix
         self.season = season
+        self.inner_norm = inner_norm
+        filename = []
+        for strin in (midfix, season, inner_norm):
+            if strin is not None:
+                filename.append(str(strin))
+        self.filename = '_'.join(filename)
+        
 
     def prepare_for_clustering(self) -> Tuple[NDArray, xr.DataArray]:
         da = self.open_da(self.midfix, self.season)
-        X = da.values.reshape(len(da.time), -1) * np.sqrt(self.coslat.flatten())[None, :]
+        norm_path = self.path.joinpath(f"norm_{self.filename}.nc")
+        numlon = len(da.lon)
+        norm_da = degcos(da.lat) * xr.DataArray(np.ones(numlon), coords={'lon': da.lon.values})
+        
+        if self.inner_norm and self.inner_norm == 1: # Grams et al. 2017
+            stds = da.chunk(
+                {'time': -1, 'lon': 20, 'lat': 20}
+            ).rolling(
+                {'time': 30}, center=True, min_periods=1
+            ).std().mean(dim=['lon', 'lat']).compute(
+                n_workers=N_WORKERS, memory_limit=MEMORY_LIMIT
+            )
+            norm_da /= stds
+        if self.inner_norm and self.inner_norm != 1:
+            raise NotImplementedError()
+        da *= norm_da
+        norm_da.to_netcdf(norm_path.as_posix())
+        X = da.values.reshape(len(da.time), -1)
         return X, da
 
     def to_dataarray(
         self,
-        centers: NDArray[Shape["*, *"], Float],
-        da: xr.DataArray,
+        centers: NDArray[Shape["*, *"], Float] | Tuple[NDArray, NDArray],
         n_pcas: int = None,
-        coords: dict | str = None,
+        coord: str = 'center',
+        mode: str = 'project',
     ) -> xr.DataArray:
-        if n_pcas: # 0 pcas is also no transform
-            centers = self.pca_inverse_transform(centers, n_pcas)
-        if coords is None:
-            coords = 'mode'
-        if isinstance(coords, str):
+        if mode == 'project' or isinstance(centers, tuple):
+            X, da = self.prepare_for_clustering()
+            X = self.pca_transform(X, n_pcas)
+            neg = coord.lower() in ['opp', 'opps', 'pca', 'pcas', 'eof', 'eofs']
+            if isinstance(centers, tuple):
+                proj1 = project_onto_clusters(X, centers[0])
+                proj2 = project_onto_clusters(X, centers[1])
+                labels = cluster_from_projs(proj1, proj2, neg=neg)
+            else:
+                projection = project_onto_clusters(X, centers)
+                labels = cluster_from_projs(projection, neg=neg)
+            unique_labels = np.unique(labels)
+            centers = [da.isel(time=labels == i).mean(dim='time') for i in unique_labels]
+            centers = xr.concat(centers, dim=coord)
+        elif mode == 'transform':
+            da = self.open_da('clim')
             coords = {
                 coords : np.arange(centers.shape[0]),
                 'lat': da.lat.values,
                 'lon': da.lon.values,
-            }
-        shape = [len(coord) for coord in coords.values()]
-        centers = xr.DataArray(centers.reshape(shape), coords=coords)
-        centers /= np.sqrt(degcos(da.lat))
+                }
+            shape = [len(coord) for coord in coords.values()]
+            if n_pcas: # 0 pcas is also no transform
+                centers = self.pca_inverse_transform(centers, n_pcas)
+            centers = xr.DataArray(centers.reshape(shape), coords=coords)
+            norm_path = self.path.joinpath(f"norm_{self.filename}.nc")
+            norm_da = xr.DataArray(norm_path.as_posix())
+            if 'time' in norm_da:
+                norm_da = norm_da.mean(dim='time')
+            centers /= norm_da
+        else:
+            raise NotImplementedError('Wrong mode specifier')
         return centers
 
     def compute_pcas(self, n_pcas: int, force: bool = False) -> str:
-        glob_string = f"pca_*_{self.midfix}_{self.season}.pkl"
+        glob_string = f"pca_*_{self.filename}.pkl"
         logging.debug(glob_string)
         potential_paths = [
             Path(path) for path in glob.glob(self.path.joinpath(glob_string).as_posix())
@@ -365,7 +493,7 @@ class ClusteringExperiment(Experiment):
         if found and not force:
             return key
         X, _ = self.prepare_for_clustering()
-        pca_path = self.path.joinpath(f"pca_{n_pcas}_{self.midfix}_{self.season}.pkl")
+        pca_path = self.path.joinpath(f"pca_{n_pcas}_{self.filename}.pkl")
         results = pca(n_components=n_pcas, whiten=True).fit(X)
         logging.debug(pca_path)
         with open(pca_path, "wb") as handle:
@@ -485,7 +613,7 @@ class ClusteringExperiment(Experiment):
         X = X.reshape((X.shape[0], -1))
         n_pcas = X.shape[1]
         opp_path: Path = self.path.joinpath(
-            f"opp_{n_pcas}_{self.midfix}_{self.season}_T{type}.pkl"
+            f"opp_{n_pcas}_{self.filename}_T{type}.pkl"
         )
         results = None
         if not opp_path.is_file():
@@ -502,8 +630,7 @@ class ClusteringExperiment(Experiment):
             return opp_path, results
         OPPs = results["OPPs"]
         eigenvals = results["T"]
-        coords = 'OPP'
-        OPPs = self.to_dataarray(OPPs, da, n_pcas, coords)
+        OPPs = self.to_dataarray(OPPs, n_pcas, 'OPP')
         return eigenvals, OPPs, opp_path
 
     def opp_transform(
@@ -558,8 +685,9 @@ class ClusteringExperiment(Experiment):
             raise NotImplementedError(
                 f"{kind} clustering not implemented. Options are kmeans and kmedoids"
             )
+            
         picklepath = self.path.joinpath(
-            f"k{suffix}_{n_clu}_{self.midfix}_{self.season}.pkl"
+            f"k{suffix}_{n_clu}_{n_pcas}_{self.filename}.pkl"
         )
         if picklepath.is_file():
             with open(picklepath, "rb") as handle:
@@ -568,22 +696,16 @@ class ClusteringExperiment(Experiment):
             results = results.fit(X)
             with open(picklepath, "wb") as handle:
                 pkl.dump(results, handle)
+                
         if not return_centers:
             return picklepath
+        
         if isinstance(results, KMeans):
             centers = results.cluster_centers_
-            coords = {
-                "cluster": np.arange(centers.shape[0]),
-                "lat": da.lat.values,
-                "lon": da.lon.values,
-            }
-            centers = self.to_dataarray(centers, da, n_pcas, coords)
         elif isinstance(results, KMedoids):
-            centers = (
-                da.isel(time=results.medoids)
-                .rename({"time": "cluster"})
-                .assign_coords({"cluster": np.arange(len(results.medoids))})
-            )
+            centers = X[results.medoids]
+        
+        centers = self.to_dataarray(centers, n_pcas, "cluster")
         return centers, picklepath
 
     def compute_som(
@@ -591,34 +713,45 @@ class ClusteringExperiment(Experiment):
         nx: int,
         ny: int,
         n_pcas: int = None,
-        OPP: bool = False,
+        OPP: int = False,
         GPU: bool = False,
         return_centers: bool = False,
         train_kwargs: dict = None,
         **kwargs,
     ) -> SOMNet | Tuple[SOMNet, xr.DataArray]:
+        
         if n_pcas is None and OPP:
             logging.warning("OPP flag will be ignored because n_pcas is set to None")
-
+        opp_suffix = ''
+        
+        if OPP and OPP == 1:
+            opp_suffix = '_T1'
+        elif OPP and OPP == 2:
+            opp_suffix = '_T2'
+            
         output_path = self.path.joinpath(
-            f"som_{nx}_{ny}_{self.midfix}_{self.season}{'_OPP' if OPP else ''}.npy"
+            f"som_{nx}_{ny}_{n_pcas}_{self.filename}{opp_suffix}.npy"
         )
+        
         if train_kwargs is None:
             train_kwargs = {}
 
         if output_path.is_file() and not return_centers:
             return output_path
+        
         if OPP:
             X, da = self.prepare_for_clustering()
-            X = self.opp_transform(X, n_pcas=n_pcas)
+            X = self.opp_transform(X, n_pcas=n_pcas, type=OPP)
         else:
             X, da = self.prepare_for_clustering()
             X = self.pca_transform(X, n_pcas=n_pcas)
+            
         if GPU:
             try:
                 X = cp.asarray(X)
             except NameError:
                 GPU = False
+                
         if output_path.is_file():
             net = SOMNet(nx, ny, X, GPU=GPU, PBC=True, load_file=output_path.as_posix())
         else:
@@ -634,61 +767,19 @@ class ClusteringExperiment(Experiment):
             )
             net.train(**train_kwargs)
             net.save_map(output_path.as_posix())
+            
         if not return_centers:
             return net
+        
         centers = net._get(net.weights)
         logging.debug(centers)
         logging.debug(centers.shape)
-        coords = {
-            "node": np.arange(nx * ny),
-            "lat": da.lat.values,
-            "lon": da.lon.values,
-        }
         if OPP:
-            centers = self.opp_inverse_transform(centers, n_pcas=n_pcas)
-        centers = self.to_dataarray(centers, da, n_pcas, coords)
+            centers = self.opp_inverse_transform(centers, n_pcas=n_pcas, type=OPP)
+            
+        centers = self.to_dataarray(centers, n_pcas, 'node')
         return net, centers
     
-
-def project_onto_clusters(X: NDArray | xr.DataArray, centers: NDArray | xr.DataArray, weighs:tuple = None) -> NDArray | xr.DataArray:
-    
-    if isinstance(X, NDArray): 
-        if isinstance(centers, xr.DataArray): # always cast to type of X
-            centers = centers.values
-        if weighs is not None:
-            X = np.swapaxes(np.swapaxes(X, weighs[0], -1) * weighs[1], -1, weighs[0]) # https://stackoverflow.com/questions/30031828/multiply-numpy-ndarray-with-1d-array-along-a-given-axis
-        return np.tensordot(X, centers.T, axes=X.ndim - 1) # cannot weigh
-        
-    if isinstance(X, xr.DataArray):
-        if isinstance(centers, NDArray):
-            if centers.ndim == 4:
-                centers = centers.reshape((centers.shape[0] * centers.shape[1], centers.shape[2], centers.shape[3]))
-            coords = dict(centers=np.arange(centers.shape[0]), **{key: val for key, val in X.coords if key != 'time'})
-            centers = xr.DataArray(centers, coords=coords)
-        try:
-            weighs = np.sqrt(degcos(X.lat))
-            X *= weighs
-            denominator = np.sum(weighs.values)
-        except AttributeError:
-            denominator = 1
-        return X.dot(centers) / denominator    
-
-def cluster_from_two_projs(X1: NDArray, X2: NDArray = None, cutoff: int = 3) -> NDArray:
-    X1 = X1[:, :cutoff]
-    if X2 is not None:
-        X2 = X2[:, :cutoff]
-        X = np.empty((X1.shape[0], X1.shape[1] + X2.shape[1]))
-        X[:, ::2] = X1
-        X[:, 1::2] = X2
-    else:
-        X = X1
-    sigma = np.std(X, ddof=1)
-    max_weight = np.argmax(np.abs(X), axis=1)
-    Xmax = np.take_along_axis(X, max_weight[:, None], axis=1)
-    sign = np.sign(Xmax)
-    sign[np.abs(Xmax) < sigma] = 0
-    return sign.flatten() * (1 + max_weight)
-
 def meandering(lines):
     m = 0
     for line in lines:  # typically few so a lopp is fine
@@ -728,7 +819,7 @@ class ZooExperiment(object):
         self.minlat = self.exp_u.minlat
         self.maxlat = self.exp_u.maxlat
         self.da_wind = self.exp_u.open_da("smooth").squeeze().load()
-        file_zonal_mean = self.exp_u.ofile("zonal_mean")
+        file_zonal_mean = self.exp_u.file("zonal_mean")
         if file_zonal_mean.is_file():
             self.da_wind_zonal_mean = xr.open_dataarray(file_zonal_mean)
         else:
