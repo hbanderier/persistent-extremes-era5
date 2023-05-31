@@ -19,6 +19,7 @@ from sklearn.decomposition import PCA as pca
 from joblib import Parallel, delayed
 from kmedoids import KMedoids
 import contourpy
+import logging
 
 try:
     import cupy as cp  # won't work on cpu nodes
@@ -27,7 +28,7 @@ except ImportError:
 
 
 from definitions import NODE, N_WORKERS, MEMORY_LIMIT, DATADIR, SMALLNAME, DATERANGEPL, DATERANGEPL_EXT, LATBINS, degcos, degsin, load_pickle, CIequal, Cdo
-
+logging.basicConfig(level=logging.WARNING)
 
 cdo = None
 
@@ -318,7 +319,7 @@ def project_onto_clusters(X: NDArray | xr.DataArray, centers: NDArray | xr.DataA
             centers = centers.values
         if weighs is not None:
             X = np.swapaxes(np.swapaxes(X, weighs[0], -1) * weighs[1], -1, weighs[0]) # https://stackoverflow.com/questions/30031828/multiply-numpy-ndarray-with-1d-array-along-a-given-axis
-        return np.tensordot(X, centers.T, axes=X.ndim - 1) # cannot weigh
+        return np.tensordot(X, centers.T, axes=X.ndim - 1)
         
     if isinstance(X, xr.DataArray):
         if isinstance(centers, NDArray):
@@ -360,6 +361,32 @@ def cluster_from_projs(X1: NDArray, X2: NDArray = None, cutoff: int = None, neg:
         sign = np.ones(Xmax.shape)
     sign[np.abs(Xmax) < sigma] = 0
     return sign.flatten() * (1 + max_weight)
+
+
+def labels_to_centers(labels: list | NDArray, da: xr.DataArray, coord: str = 'center') -> xr.DataArray:
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    counts = counts / float(len(labels))
+    centers = [da.isel(time=(labels == i)).mean(dim='time') for i in unique_labels]
+    centers = xr.concat(centers, dim=coord)
+    return centers.assign_coords({'ratios': (coord, counts)})
+
+
+def centers_as_dataarray(
+    centers: NDArray[Shape["*, *"], Float] | Tuple[NDArray, NDArray], 
+    X: NDArray[Shape["*, *"], Float], 
+    da: xr.DataArray, 
+    coord: str = 'center'
+) -> xr.DataArray:
+    logging.debug('Projecting on dataarray')
+    neg = coord.lower() in ['opp', 'opps', 'pca', 'pcas', 'eof', 'eofs']
+    if isinstance(centers, tuple):
+        proj1 = project_onto_clusters(X, centers[0])
+        proj2 = project_onto_clusters(X, centers[1])
+        labels = cluster_from_projs(proj1, proj2, neg=neg)
+    else:
+        projection = project_onto_clusters(X, centers)
+        labels = cluster_from_projs(projection, neg=neg)
+    return labels_to_centers(labels, da, coord)
 
 
 @dataclass(init=False)
@@ -410,74 +437,55 @@ class ClusteringExperiment(Experiment):
             if strin is not None:
                 filename.append(str(strin))
         self.filename = '_'.join(filename)
-        
 
     def prepare_for_clustering(self) -> Tuple[NDArray, xr.DataArray]:
         da = self.open_da(self.midfix, self.season)
         norm_path = self.path.joinpath(f"norm_{self.filename}.nc")
-        numlon = len(da.lon)
-        norm_da = degcos(da.lat) * xr.DataArray(np.ones(numlon), coords={'lon': da.lon.values})
-        
-        if self.inner_norm and self.inner_norm == 1: # Grams et al. 2017
-            stds = da.chunk(
-                {'time': -1, 'lon': 20, 'lat': 20}
-            ).rolling(
-                {'time': 30}, center=True, min_periods=1
-            ).std().mean(dim=['lon', 'lat']).compute(
-                n_workers=N_WORKERS, memory_limit=MEMORY_LIMIT
-            )
-            norm_da /= stds
-        if self.inner_norm and self.inner_norm != 1:
-            raise NotImplementedError()
-        da *= norm_da
-        norm_da.to_netcdf(norm_path.as_posix())
-        X = da.values.reshape(len(da.time), -1)
+        if norm_path.is_file():
+            norm_da = xr.open_dataarray(norm_path.as_posix())
+        else:
+            norm_da = np.sqrt(degcos(da.lat))
+            
+            if self.inner_norm and self.inner_norm == 1: # Grams et al. 2017
+                stds = da.chunk(
+                    {'time': -1, 'lon': 20, 'lat': 20}
+                ).rolling(
+                    {'time': 30}, center=True, min_periods=1
+                ).std().mean(dim=['lon', 'lat']).compute(
+                    n_workers=N_WORKERS, memory_limit=MEMORY_LIMIT
+                )
+                norm_da = norm_da * (1 / stds)
+            if self.inner_norm and self.inner_norm != 1:
+                raise NotImplementedError()
+            norm_da.to_netcdf(norm_path.as_posix())
+        da_weighted = da * norm_da
+        X = da_weighted.values.reshape(len(da_weighted.time), -1)
         return X, da
 
-    def to_dataarray(
+    def inverse_transform_centers(
         self,
         centers: NDArray[Shape["*, *"], Float] | Tuple[NDArray, NDArray],
         n_pcas: int = None,
-        coord: str = 'center',
-        mode: str = 'project',
-    ) -> xr.DataArray:
-        if mode == 'project' or isinstance(centers, tuple):
-            X, da = self.prepare_for_clustering()
-            X = self.pca_transform(X, n_pcas)
-            neg = coord.lower() in ['opp', 'opps', 'pca', 'pcas', 'eof', 'eofs']
-            if isinstance(centers, tuple):
-                proj1 = project_onto_clusters(X, centers[0])
-                proj2 = project_onto_clusters(X, centers[1])
-                labels = cluster_from_projs(proj1, proj2, neg=neg)
-            else:
-                projection = project_onto_clusters(X, centers)
-                labels = cluster_from_projs(projection, neg=neg)
-            unique_labels = np.unique(labels)
-            centers = [da.isel(time=labels == i).mean(dim='time') for i in unique_labels]
-            centers = xr.concat(centers, dim=coord)
-        elif mode == 'transform':
-            da = self.open_da('clim')
-            coords = {
-                coords : np.arange(centers.shape[0]),
-                'lat': da.lat.values,
-                'lon': da.lon.values,
-                }
-            shape = [len(coord) for coord in coords.values()]
-            if n_pcas: # 0 pcas is also no transform
-                centers = self.pca_inverse_transform(centers, n_pcas)
-            centers = xr.DataArray(centers.reshape(shape), coords=coords)
-            norm_path = self.path.joinpath(f"norm_{self.filename}.nc")
-            norm_da = xr.DataArray(norm_path.as_posix())
-            if 'time' in norm_da:
-                norm_da = norm_da.mean(dim='time')
-            centers /= norm_da
-        else:
-            raise NotImplementedError('Wrong mode specifier')
-        return centers
+    ) -> xr.DataArray:            
+        logging.debug('Transforming to dataarray')
+        da = self.open_da('clim')
+        coords = {
+            coords : np.arange(centers.shape[0]),
+            'lat': da.lat.values,
+            'lon': da.lon.values,
+            }
+        shape = [len(coord) for coord in coords.values()]
+        if n_pcas: # 0 pcas is also no transform
+            centers = self.pca_inverse_transform(centers, n_pcas)
+        centers = xr.DataArray(centers.reshape(shape), coords=coords)
+        norm_path = self.path.joinpath(f"norm_{self.filename}.nc")
+        norm_da = xr.DataArray(norm_path.as_posix())
+        if 'time' in norm_da:
+            norm_da = norm_da.mean(dim='time')
+        return centers / norm_da
 
     def compute_pcas(self, n_pcas: int, force: bool = False) -> str:
         glob_string = f"pca_*_{self.filename}.pkl"
-        logging.debug(glob_string)
         potential_paths = [
             Path(path) for path in glob.glob(self.path.joinpath(glob_string).as_posix())
         ]
@@ -485,17 +493,16 @@ class ClusteringExperiment(Experiment):
             path: int(path.parts[-1].split("_")[1]) for path in potential_paths
         }
         found = False
-        logging.debug(potential_paths)
         for key, value in potential_paths.items():
             if value >= n_pcas:
                 found = True
                 break
         if found and not force:
             return key
+        logging.debug(f'Computing {n_pcas} pcas')
         X, _ = self.prepare_for_clustering()
         pca_path = self.path.joinpath(f"pca_{n_pcas}_{self.filename}.pkl")
         results = pca(n_components=n_pcas, whiten=True).fit(X)
-        logging.debug(pca_path)
         with open(pca_path, "wb") as handle:
             pkl.dump(results, handle)
         return pca_path
@@ -618,8 +625,10 @@ class ClusteringExperiment(Experiment):
         results = None
         if not opp_path.is_file():
             if type == 1:
+                logging.debug('Computing T1 OPPs')
                 results = self._compute_opps_T1(X, lag_max)
             if type == 2:
+                logging.debug('Computing T2 OPPs')
                 results = self._compute_opps_T2(X, lag_max)
             with open(opp_path, "wb") as handle:
                 pkl.dump(results, handle)
@@ -630,7 +639,7 @@ class ClusteringExperiment(Experiment):
             return opp_path, results
         OPPs = results["OPPs"]
         eigenvals = results["T"]
-        OPPs = self.to_dataarray(OPPs, n_pcas, 'OPP')
+        OPPs = centers_as_dataarray(OPPs, X, da, 'OPP')
         return eigenvals, OPPs, opp_path
 
     def opp_transform(
@@ -671,12 +680,12 @@ class ClusteringExperiment(Experiment):
         n_clu: int,
         n_pcas: int,
         kind: str = "kmeans",
-        return_centers: bool = True,
+        return_centers: str = None,
     ) -> str | Tuple[xr.DataArray, str]:
         X, da = self.prepare_for_clustering()
         X = self.pca_transform(X, n_pcas)
         if CIequal(kind, "kmeans"):
-            results = KMeans(n_clu, n_init="auto")
+            results = KMeans(n_clu)
             suffix = ""
         elif CIequal(kind, "kmedoids"):
             results = KMedoids(n_clu)
@@ -693,6 +702,7 @@ class ClusteringExperiment(Experiment):
             with open(picklepath, "rb") as handle:
                 results = pkl.load(handle)
         else:
+            logging.debug(f'Fitting {kind} clustering with {n_clu} clusters')
             results = results.fit(X)
             with open(picklepath, "wb") as handle:
                 pkl.dump(results, handle)
@@ -701,11 +711,17 @@ class ClusteringExperiment(Experiment):
             return picklepath
         
         if isinstance(results, KMeans):
+            if return_centers == 'transform':
+                return labels_to_centers(results.labels_, da), picklepath
             centers = results.cluster_centers_
         elif isinstance(results, KMedoids):
+            if return_centers == 'transform':
+                centers = da.isel(time=results.medoids)
+                centers = centers.assign_coords({'time': np.arange(centers.shape[0])})
+                return centers.rename({'time': 'medoid'}), picklepath
             centers = X[results.medoids]
         
-        centers = self.to_dataarray(centers, n_pcas, "cluster")
+        centers = centers_as_dataarray(centers, X, da, 'center')
         return centers, picklepath
 
     def compute_som(
@@ -771,13 +787,7 @@ class ClusteringExperiment(Experiment):
         if not return_centers:
             return net
         
-        centers = net._get(net.weights)
-        logging.debug(centers)
-        logging.debug(centers.shape)
-        if OPP:
-            centers = self.opp_inverse_transform(centers, n_pcas=n_pcas, type=OPP)
-            
-        centers = self.to_dataarray(centers, n_pcas, 'node')
+        centers = labels_to_centers(net.bmus, da, 'nodes')
         return net, centers
     
 def meandering(lines):
@@ -808,17 +818,17 @@ class ZooExperiment(object):
     ):
         self.dataset = dataset
         self.exp_u = Experiment(
-            dataset, "Wind", "Low", region, "u", minlon, maxlon, minlat, maxlat, True
+            dataset, "Wind", "Low", region, "u", minlon, maxlon, minlat, maxlat, 'doy', clim_smoothing={'dayofyear': ('fft', 150)}, smoothing={'lon': ('win', 60)},
         )
         self.exp_z = Experiment(
-            dataset, "Geopotential", "500", region, None, minlon, maxlon, minlat, maxlat
+            dataset, "Geopotential", "500", region, None, minlon, maxlon, minlat, maxlat, clim_type='doy', clim_smoothing={}, smoothing={},
         )
         self.region = self.exp_u.region
         self.minlon = self.exp_u.minlon
         self.maxlon = self.exp_u.maxlon
         self.minlat = self.exp_u.minlat
         self.maxlat = self.exp_u.maxlat
-        self.da_wind = self.exp_u.open_da("smooth").squeeze().load()
+        self.da_wind = self.exp_u.open_da("anom").squeeze().load()
         file_zonal_mean = self.exp_u.file("zonal_mean")
         if file_zonal_mean.is_file():
             self.da_wind_zonal_mean = xr.open_dataarray(file_zonal_mean)

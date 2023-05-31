@@ -13,11 +13,9 @@ from typing import Any, Optional, Tuple, Union, Iterable
 
 import pandas as pd
 import xarray as xr
-import xrft
 from cdo import Cdo
 from nptyping import Float, Int, NDArray, Object, Shape
 
-# logging.basicConfig(level=logging.DEBUG)
 pf = platform.platform()
 if pf.find("cray") >= 0:
     NODE = "DAINT"
@@ -33,7 +31,7 @@ elif pf.find("el7") >= 0:  # find better later
     NODE = "UBELIX"
     DATADIR = "/storage/scratch/users/hb22g102"
     os.environ["CDO"] = "/storage/homefs/hb22g102/mambaforge/envs/env11/bin/cdo"
-    N_WORKERS=8
+    N_WORKERS=16
     MEMORY_LIMIT='4GiB'
     
 CLIMSTOR = "/mnt/climstor/ecmwf/era5/raw"

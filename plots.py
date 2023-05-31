@@ -592,15 +592,15 @@ class Clusterplot:
             cmap = 'PiYG' if sym else 'Greens'
         if isinstance(cmap, str):
             cmap = mpl.colormaps[cmap]
-
         nabove = np.sum(unique_labs > 0)
         if sym:
-            colors = np.linspace(1., 0.66, nabove)
-            colors = [1 - colors, [0.5], colors]
+            nbelow = np.sum(unique_labs < 0)
+            cab = np.linspace(1, 0.66, nabove)
+            cbe = np.linspace(0.33, 0, nbelow)
+            colors = [*cbe, 0.5, *cab]
         else:
             colors = np.linspace(1., 0.33, nabove)
-            colors = [[0.5], colors]
-        colors = np.concatenate(colors)
+            colors = [0, *colors]
         colors = cmap(colors)
         
         xmin, ymin = self.axes[0].get_position().xmin, self.axes[0].get_position().ymin
