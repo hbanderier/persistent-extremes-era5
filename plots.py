@@ -167,7 +167,7 @@ def honeycomb_panel(
     return fig, axes
 
 
-def infer_extent(to_plot: list, sym: bool) -> Tuple[int, float]: # I could market this
+def infer_extent(to_plot: list, sym: bool) -> Tuple[int, float]:  # I could market this
     max = np.quantile(to_plot, q=0.97)
     lmax = np.log10(max)
     lmax = int(np.sign(lmax) * np.round(np.abs(lmax)))
@@ -184,8 +184,12 @@ def infer_extent(to_plot: list, sym: bool) -> Tuple[int, float]: # I could marke
             min_rounded = 0
         else:
             minus = int(np.ceil(minus))
-            min_rounded = np.floor(min * 10 ** (-lmax + minus) / 5) * 5 * 10 ** (lmax - minus)
-            max_rounded = np.ceil(max * 10 ** (-lmax + minus) / 5) * 5 * 10 ** (lmax - minus)
+            min_rounded = (
+                np.floor(min * 10 ** (-lmax + minus) / 5) * 5 * 10 ** (lmax - minus)
+            )
+            max_rounded = (
+                np.ceil(max * 10 ** (-lmax + minus) / 5) * 5 * 10 ** (lmax - minus)
+            )
         extent = max_rounded - min_rounded
         for nlev in range(4, 9):
             try:
@@ -195,12 +199,9 @@ def infer_extent(to_plot: list, sym: bool) -> Tuple[int, float]: # I could marke
                 cand_nd = len(str(firstlev))
             except ZeroDivisionError:
                 cand_nd = 1000
-            if (
-                cand_nd < num_digits or (
-                    cand_nd == num_digits and np.isclose(
-                        (firstlev * 10 ** (-lmax + 1)) % 5, 0
-                    )
-                )
+            if cand_nd < num_digits or (
+                cand_nd == num_digits
+                and np.isclose((firstlev * 10 ** (-lmax + 1)) % 5, 0)
             ):
                 winner = (nlev, min_rounded, max_rounded)
                 num_digits = cand_nd
@@ -218,7 +219,6 @@ def infer_sym(to_plot: list) -> bool:
 def create_levels(
     to_plot: list, nlevels: int = None, sym: bool = False
 ) -> Tuple[NDArray, NDArray, str]:
-    
     if sym is None:
         sym = infer_sym(to_plot)
 
@@ -275,7 +275,7 @@ class Clusterplot:
             projection = ccrs.LambertConformal(
                 central_longitude=self.central_longitude,
             )
-            ratio = .6 * self.nrow / (self.ncol + (0.5 if honeycomb else 0))
+            ratio = 0.6 * self.nrow / (self.ncol + (0.5 if honeycomb else 0))
             self.boundary = make_boundary_path(*region)
         else:
             projection = ccrs.PlateCarree()
@@ -298,7 +298,10 @@ class Clusterplot:
             )
         self.axes = np.atleast_1d(self.axes).flatten()
         for ax in self.axes:
-            ax.set_extent([self.minlon, self.maxlon, self.minlat, self.maxlat], crs=ccrs.PlateCarree())
+            ax.set_extent(
+                [self.minlon, self.maxlon, self.minlat, self.maxlat],
+                crs=ccrs.PlateCarree(),
+            )
             ax.add_feature(COASTLINE)
             # ax.add_feature(BORDERS, transform=ccrs.PlateCarree())
 
@@ -335,10 +338,10 @@ class Clusterplot:
 
     def _add_titles(self, titles: Iterable) -> None:
         if len(titles) > len(self.axes):
-            titles = titles[:len(self.axes)]
+            titles = titles[: len(self.axes)]
         for title, ax in zip(titles, self.axes):
             if isinstance(title, float):
-                title = f'{title:.2f}'
+                title = f"{title:.2f}"
             ax.set_title(title)
 
     def add_contour(
@@ -365,9 +368,9 @@ class Clusterplot:
             linestyles = doubleit(linestyles, len(levelsc), "solid")
 
         if not sym and colors is None:
-            colors = 'black'
+            colors = "black"
         if not sym and linestyles is None:
-            linestyles = 'solid'
+            linestyles = "solid"
 
         for ax, toplt in zip(self.axes, to_plot):
             cs = ax.contour(
@@ -416,9 +419,7 @@ class Clusterplot:
         lon = to_plot[0]["lon"].values
         lat = to_plot[0]["lat"].values
 
-        levelsc, levelscf, extend, sym = create_levels(
-            to_plot, nlevels, sym
-        )
+        levelsc, levelscf, extend, sym = create_levels(to_plot, nlevels, sym)
 
         if cmap is None and sym:
             cmap = "seismic"
@@ -493,7 +494,9 @@ class Clusterplot:
         n_sam = [np.sum(mask[:, i]) for i in range(len(self.axes))]
         significances = []
         for i in tqdm.trange(len(self.axes)):
-            significances.append(field_significance(to_plot[i], da, n_sam[i], n_sel, thresh_up)[int(FDR)])
+            significances.append(
+                field_significance(to_plot[i], da, n_sam[i], n_sel, thresh_up)[int(FDR)]
+            )
 
         for ax, signif in zip(self.axes, significances):
             cs = ax.contourf(
@@ -527,9 +530,7 @@ class Clusterplot:
         linestyles: list | str = None,
         **kwargs,
     ) -> ScalarMappable | None:
-        to_plot = [
-            da.isel(time=mask[:, i]).mean(dim="time") for i in range(len(self.axes))
-        ]
+        to_plot = [da.isel(time=mas).mean(dim="time") for mas in mask.T]
         if type == "contourf":
             im = self.add_contourf(
                 to_plot,
@@ -578,10 +579,10 @@ class Clusterplot:
         if stippling:
             self.add_stippling(da, mask, to_plot)
         return im
-    
+
     def cluster_on_fig(
-        self, 
-        coords: NDArray, 
+        self,
+        coords: NDArray,
         clu_labs: NDArray,
         cmap: str | Colormap = None,
     ) -> None:
@@ -589,7 +590,7 @@ class Clusterplot:
         sym = np.any(unique_labs < 0)
 
         if cmap is None:
-            cmap = 'PiYG' if sym else 'Greens'
+            cmap = "PiYG" if sym else "Greens"
         if isinstance(cmap, str):
             cmap = mpl.colormaps[cmap]
         nabove = np.sum(unique_labs > 0)
@@ -597,52 +598,70 @@ class Clusterplot:
             nbelow = np.sum(unique_labs < 0)
             cab = np.linspace(1, 0.66, nabove)
             cbe = np.linspace(0.33, 0, nbelow)
-            colors = [*cbe, 0.5, *cab]
+            if 0 in unique_labs:
+                zerocol = [0.5]
+            else:
+                zerocol = []
+            colors = [*cbe, *zerocol, *cab]
         else:
-            colors = np.linspace(1., 0.33, nabove)
-            colors = [0, *colors]
+            if 0 in unique_labs:
+                zerocol = [0.0]
+            else:
+                zerocol = []
+            colors = np.linspace(1.0, 0.33, nabove)
+            colors = [*zerocol, *colors]
         colors = cmap(colors)
-        
+
         xmin, ymin = self.axes[0].get_position().xmin, self.axes[0].get_position().ymin
-        xmax, ymax = self.axes[-1].get_position().xmax, self.axes[-1].get_position().ymax
+        xmax, ymax = (
+            self.axes[-1].get_position().xmax,
+            self.axes[-1].get_position().ymax,
+        )
         x = np.linspace(xmin, xmax, 200)
         y = np.linspace(ymin, ymax, 200)
         newmin, newmax = np.asarray([xmin, ymin]), np.asarray([xmax, ymax])
-        dx = coords[10, 0] - coords[0, 0]
+        dx = coords[self.nrow, 0] - coords[0, 0]
         dy = (coords[2, 1] - coords[0, 1]) / 2
         for coord, val in zip(coords, clu_labs):
-            newcs = [[coord[0] + sgnx * dx / 2.2, coord[1] + sgny * dy / 2.2] for sgnx, sgny in product([-1, 0, 1], [-1, 0, 1])]
+            newcs = [
+                [coord[0] + sgnx * dx / 2.2, coord[1] + sgny * dy / 2.2]
+                for sgnx, sgny in product([-1, 0, 1], [-1, 0, 1])
+            ]
             coords = np.append(coords, newcs, axis=0)
             clu_labs = np.append(clu_labs, [val] * len(newcs))
         min, max = np.amin(coords, axis=0), np.amax(coords, axis=0)
-        reduced_coords = (coords - min[None, :]) / (max - min)[None, :] * (newmax - newmin)[None, :] + newmin[None, :]
-        for i, lab in enumerate(np.unique(clu_labs)):
+        reduced_coords = (coords - min[None, :]) / (max - min)[None, :] * (
+            newmax - newmin
+        )[None, :] + newmin[None, :]
+        for i, lab in enumerate(unique_labs):
             interp = LinearNDInterpolator(reduced_coords, clu_labs == lab)
-            r = interp(*np.meshgrid(x, y)) 
+            r = interp(*np.meshgrid(x, y))
 
             if lab == 0:
                 iter = contour_generator(x, y, r).filled(0.6, 1)[0]
-                ls = 'none'
-                fc = 'black'
+                ls = "none"
+                fc = "black"
                 alpha = 0.2
-                ec = 'none'
+                ec = "none"
             else:
                 iter = contour_generator(x, y, r).lines(0.6)
-                ls = 'solid' if lab >= 0 else 'dashed'
+                ls = "solid" if lab >= 0 else "dashed"
                 alpha = 1
-                fc = 'none' 
+                fc = "none"
                 ec = colors[i]
-            
+
             for p in iter:
-                self.fig.add_artist(PathPatch(
-                    mpath.Path(p), 
-                    fc=fc,
-                    alpha=alpha,
-                    ec=ec, 
-                    lw=6,
-                    ls=ls,
-                ))
-        
+                self.fig.add_artist(
+                    PathPatch(
+                        mpath.Path(p),
+                        fc=fc,
+                        alpha=alpha,
+                        ec=ec,
+                        lw=6,
+                        ls=ls,
+                    )
+                )
+
 
 def cdf(timeseries: Union[DataArray, NDArray]) -> Tuple[NDArray, NDArray]:
     """Computes the cumulative distribution function of a 1D DataArray

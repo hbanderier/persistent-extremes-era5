@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../simpsom/simpsom"
+		}
+	],
+	"settings": {
+		"python.languageServer": "Pylance"
+	}
+}
