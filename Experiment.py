@@ -240,8 +240,10 @@ class Experiment(object):
         self.base_path = Path(
             DATADIR, self.dataset, self.variable, self.level, self.region
         )
+        unpacked = unpack_smooth_map(self.clim_smoothing)
+        underscore = '_' if unpacked != '' else ''
         self.clim_path = self.base_path.joinpath(
-            self.clim_type + "_" + unpack_smooth_map(self.clim_smoothing)
+            self.clim_type + underscore + unpacked
         )
         self.path = self.clim_path.joinpath(
             unpack_smooth_map(self.smoothing)
@@ -282,7 +284,7 @@ class Experiment(object):
         smoothing: Mapping = None,
     ) -> None:
         da = self.open_da(chunks={"time": -1, "lon": 30, "lat": 30})
-        if clim_type == "none" and not self.file("anom").is_file():
+        if clim_type == "none":
             anom = da
         else:
             anom, clim = compute_anomaly(da, clim_type, clim_smoothing)

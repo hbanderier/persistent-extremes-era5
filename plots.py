@@ -363,6 +363,9 @@ class Clusterplot:
 
         levelsc, _, _, sym = create_levels(to_plot, nlevels, sym)
 
+        if sym and linestyles is None:
+            linestyles = ['dashed', 'solid']
+            
         if sym:
             colors = doubleit(colors, len(levelsc), "k")
             linestyles = doubleit(linestyles, len(levelsc), "solid")
@@ -422,7 +425,7 @@ class Clusterplot:
         levelsc, levelscf, extend, sym = create_levels(to_plot, nlevels, sym)
 
         if cmap is None and sym:
-            cmap = "seismic"
+            cmap = "bwr"
         elif cmap is None:
             cmap = "BuPu"  # Just think it's neat
         if isinstance(cmap, str):
