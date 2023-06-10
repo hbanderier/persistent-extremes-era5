@@ -15,7 +15,7 @@ def main():
             {
                 'product_type': 'reanalysis',
                 'format': 'netcdf',
-                'variable': 'u_component_of_wind',
+                'variable': 'v_component_of_wind',
                 'pressure_level': [
                     '300', '500', '700', '775', '850', '925'
                 ],

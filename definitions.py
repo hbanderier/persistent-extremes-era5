@@ -1,5 +1,6 @@
 import os
 import platform
+from time import perf_counter
 
 import numpy as np
 
@@ -15,6 +16,10 @@ import pandas as pd
 import xarray as xr
 from cdo import Cdo
 from nptyping import Float, Int, NDArray, Object, Shape
+from multiprocessing import Pool
+from functools import partial
+from itertools import permutations
+from scipy.signal import find_peaks
 
 pf = platform.platform()
 if pf.find("cray") >= 0:
@@ -301,6 +306,15 @@ def Hurst_exponent(path: Path, subdivs: int = 11) -> Path:
         pkl.dump(Hurst, handle)
     return opath
 
+
+def infer_sym(to_plot: Any) -> bool:
+    max = np.amax(to_plot)
+    min = np.amin(to_plot)
+    return (np.sign(max) == -np.sign(min)) and (
+        np.abs(np.log10(np.abs(max)) - np.log10(np.abs(min))) <= 1
+    )
+    
+
 def searchsortednd(a: NDArray, v: NDArray, **kwargs) -> NDArray:  # https://stackoverflow.com/questions/40588403/vectorized-searchsorted-numpy + reshapes
     orig_shapex, nx = v.shape[:-1], v.shape[-1]
     orig_shapea, na = a.shape[:-1], a.shape[-1]
@@ -317,10 +331,18 @@ def searchsortednd(a: NDArray, v: NDArray, **kwargs) -> NDArray:  # https://stac
 
 def field_significance(to_test: xr.DataArray, take_from: NDArray | xr.DataArray, n_sam: int, n_sel: int = 100, thresh_up=True) -> Tuple[xr.DataArray, xr.DataArray]:
     indices = np.random.rand(n_sel, take_from.shape[0]).argpartition(n_sam, axis=1)[:, :n_sam]
+    to_test = np.abs(to_test)
     if isinstance(take_from, xr.DataArray):
         take_from = take_from.values
-    empirical_distribution = np.mean(np.take(take_from, indices, axis=0), axis=1)
-    nocorr = to_test > np.quantile(empirical_distribution, q=0.95, axis=0)
+    empirical_distribution = []
+    cs = 500
+    for ns in range(0, n_sam, cs):
+        end = min(ns + cs, n_sam)
+        empirical_distribution.append(np.mean(np.take(take_from, indices[:, ns:end], axis=0), axis=1))
+    empirical_distribution = np.abs(np.mean(empirical_distribution, axis=0))
+    sym = infer_sym(empirical_distribution)
+    q = 0.975 if sym else 0.95
+    nocorr = to_test > np.quantile(empirical_distribution, q=q, axis=0)
 
     # FDR correction
     idxs = np.argsort(empirical_distribution, axis=0)
@@ -332,7 +354,7 @@ def field_significance(to_test: xr.DataArray, take_from: NDArray | xr.DataArray,
     argp = np.argsort(p)
     p = p[argp]
     numvalid = len(p)
-    bh_line = 0.1 * np.arange(1, numvalid + 1) / numvalid
+    bh_line = (1 - q) * 2 * np.arange(1, numvalid + 1) / numvalid
     fdrcorr = np.zeros(len(p), dtype=bool)
     if thresh_up:
         above = ((1 - p)[::-1] < bh_line)[::-1]
@@ -346,3 +368,79 @@ def field_significance(to_test: xr.DataArray, take_from: NDArray | xr.DataArray,
     return nocorr, fdrcorr
 
 
+def find_jets(X, lon: NDArray, lat: NDArray, height=20, distance=20, width=6, grad=4, juncdistlo=5, juncdistla=6, cutoff=60) -> list:
+    jets = []
+    for i, x in enumerate(X.T):
+        lo = lon[i]
+        peaks = find_peaks(x, height=height, distance=distance, width=width)[0]
+        for la, sp in zip(lat[peaks], x[peaks]):
+            found = False
+            for jet in jets:
+                if (np.abs(jet[-1][0] - lo) + np.abs(jet[-1][1] - la)) <= grad:
+                    jet.append((lo, la, sp))
+                    found = True
+                    break
+            if not found:
+                jets.append([(lo, la, sp)])
+    
+    jets = [np.asarray(jet) for jet in jets]
+    jets = [jet[np.argsort(jet[:, 0])] for jet in jets]
+    done = False
+    while not done:
+        done = True
+        njets = len(jets)
+        for i1, i2 in permutations(range(njets), 2):
+            jet1, jet2 = jets[i1], jets[i2]
+            dlo1 = np.abs(jet1[-1][0] - jet2[0][0])
+            dla1 = np.abs(jet1[-1][1] - jet2[0][1])
+            dlo2 = np.abs(jet1[-1][0] - jet2[-1][0])
+            dla2 = np.abs(jet1[-1][1] - jet2[-1][1])
+            if dlo1 <= juncdistlo and dla1 <= juncdistla:
+                jets[i1] = np.concatenate([jet1, jet2], axis=0)
+                jets[i1] = jets[i1][np.argsort(jets[i1][:, 0])]
+                del jets[i2]
+                done = False
+                break
+            if dlo2 <= juncdistlo and dla2 <= juncdistla:
+                jets[i1] = np.concatenate([jet1, jet2[::-1]], axis=0)
+                jets[i1] = jets[i1][np.argsort(jets[i1][:, 0])]
+                del jets[i2]
+                done = False
+                break
+
+    for i in range(len(jets) - 1, -1, -1):
+        if len(jets[i]) < cutoff:
+            del jets[i]
+    
+    return jets
+
+
+def find_all_jets(da: xr.DataArray, X: NDArray = None, processes: int = 8, chunksize: int = 10, **kwargs) -> Tuple[list, xr.DataArray]:
+    lon = da.lon.values
+    lat = da.lat.values
+    func = partial(find_jets, lon=lon, lat=lat, **kwargs)
+    if X is None:
+        X = da.values
+    with Pool(processes=processes) as pool:
+        alljets = pool.map(func, X, chunksize=chunksize)
+    return alljets
+
+
+def is_double_jet(da: xr.DataArray, alljets: list, eur_thresh: float = 1500) -> xr.DataArray:
+    isdouble = da[:, 0, 0].copy(data=np.zeros(len(da), dtype=bool)).reset_coords(['lon', 'lat'], drop=True)
+    for i, jetlist in enumerate(alljets):
+        props = []
+        for jet in jetlist:
+            meany = np.mean(jet[:, 1])
+            x = jet[:, 0]
+            inteur = np.trapz(jet[x > -10, 2], x=x[x > -10]) > eur_thresh
+            props.append((inteur, meany))
+        count = 0
+        meany = -1000
+        for prop in props:
+            if prop[0] and (np.abs(prop[1] - meany) > 15):
+                meany = prop[1]
+                count += 1
+        isdouble[i] = count > 1
+    return isdouble
+    

@@ -262,7 +262,7 @@ class Experiment(object):
                 input=ifile.as_posix(),
                 output=ofile.as_posix(),
             )
-        if not self.file("clim").is_file() or not self.file("anom").is_file():
+        if not self.file("anom").is_file():
             self.compute_anomaly(self.clim_type, self.clim_smoothing, self.smoothing)
 
     def orig_file(self) -> Path:
@@ -428,6 +428,7 @@ def cluster_from_projs(
         else:
             cutoff = min(X1.shape[1], X2.shape[1])
     X1 = X1[:, :cutoff]
+    
     if X2 is not None:
         X2 = X2[:, :cutoff]
         X = np.empty((X1.shape[0], X1.shape[1] + X2.shape[1]))
@@ -435,6 +436,7 @@ def cluster_from_projs(
         X[:, 1::2] = X2
     else:
         X = X1
+    print(X2 is not None, neg, adjust)
     sigma = np.std(X, ddof=1)
     if neg:
         max_weight = np.argmax(np.abs(X), axis=1)
@@ -788,16 +790,7 @@ class ClusteringExperiment(Experiment):
         da: xr.DataArray = None,
         X: NDArray = None,
     ) -> Tuple[xr.DataArray, xr.DataArray]:
-        if return_type in [
-            RAW_ADJUST_LABELS,
-            ADJUST_RAW,
-            REALSPACE_INV_TRANS_ADJUST_LABELS,
-            ADJUST_REALSPACE,
-            ADJUST_DIRECT_REALSPACE,
-        ]:
-            projection = project_onto_clusters(X, centers)
-            labels = cluster_from_projs(projection, neg=False)
-
+        
         unique_labels, counts = np.unique(labels, return_counts=True)
         counts = counts / len(labels)
         labels = xr.DataArray(labels, coords={"time": da.time.values})
@@ -879,13 +872,25 @@ class ClusteringExperiment(Experiment):
                 else ADJUST_REALSPACE
             )
 
-        labels = results.labels_
         centers = results.cluster_centers_
         try:
             medoids = results.medoid_indices_
         except AttributeError:
             medoids = None
 
+        if return_type in [ # Has to be here if center_output is to be able to accept both OPP clustering and regular clustering. Absolutely dirty, might change later
+            RAW_ADJUST_LABELS,
+            ADJUST_RAW,
+            REALSPACE_INV_TRANS_ADJUST_LABELS,
+            ADJUST_REALSPACE,
+            ADJUST_DIRECT_REALSPACE,
+        ]:
+            projection = project_onto_clusters(X, centers)
+            labels = cluster_from_projs(projection, neg=False)
+            
+        else:
+            labels = results.labels_
+            
         centers, labels = self.center_output(
             centers, labels, medoids, return_type, da, X
         )
@@ -899,6 +904,7 @@ class ClusteringExperiment(Experiment):
         return_type: int = RAW,
     ) -> Tuple[xr.DataArray, xr.DataArray]:
         X, da = self.prepare_for_clustering()
+        X = self.pca_transform(X, n_pcas)
         adjust = return_type in [
             ADJUST_RAW,
             RAW_ADJUST_LABELS,

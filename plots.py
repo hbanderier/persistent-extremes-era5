@@ -29,7 +29,7 @@ from matplotlib.gridspec import GridSpec
 import cartopy.crs as ccrs
 import cartopy.feature as feat
 
-from definitions import field_significance, LATBINS
+from definitions import field_significance, LATBINS, infer_sym
 
 
 COLORS5 = [  # https://coolors.co/palette/ef476f-ffd166-06d6a0-118ab2-073b4c
@@ -73,7 +73,7 @@ def make_transparent(
         cmap = mpl.colormaps[cmap]
     if nlev is None:
         nlev = cmap.N
-    colorlist = cmap(np.linspace(0, 1, 5))
+    colorlist = cmap(np.linspace(0, 1, nlev))
     colorlist[0, -1] = 0
     colorlist[1:, -1] = alpha_others
     return ListedColormap(colorlist)
@@ -208,14 +208,6 @@ def infer_extent(to_plot: list, sym: bool) -> Tuple[int, float]:  # I could mark
     return winner
 
 
-def infer_sym(to_plot: list) -> bool:
-    max = np.amax(to_plot)
-    min = np.amin(to_plot)
-    return (np.sign(max) == -np.sign(min)) and (
-        np.abs(np.log10(np.abs(max)) - np.log10(np.abs(min))) <= 1
-    )
-
-
 def create_levels(
     to_plot: list, nlevels: int = None, sym: bool = False
 ) -> Tuple[NDArray, NDArray, str]:
@@ -294,6 +286,7 @@ class Clusterplot:
                 self.nrow,
                 self.ncol,
                 figsize=(6.5 * self.ncol, 6.5 * self.ncol * ratio),
+                constrained_layout=True,
                 subplot_kw={"projection": projection},
             )
         self.axes = np.atleast_1d(self.axes).flatten()
@@ -432,9 +425,9 @@ class Clusterplot:
             cmap = mpl.colormaps[cmap]
         if transparify and not sym:
             if isinstance(transparify, float):
-                cmap = make_transparent(cmap, alpha_others=transparify)
+                cmap = make_transparent(cmap, nlev=len(levelscf), alpha_others=transparify)
             else:
-                cmap = make_transparent(cmap)
+                cmap = make_transparent(cmap, nlev=len(levelscf))
 
         norm = BoundaryNorm(levelscf, cmap.N, extend=extend)
         im = ScalarMappable(norm=norm, cmap=cmap)
@@ -484,19 +477,19 @@ class Clusterplot:
         to_plot: list = None,
         n_sel: int = 100,
         thresh_up: bool = True,
-        FDR: bool = True,
+        FDR: bool = False,
         color: str | list = "black",
         hatch: str = "..",
     ) -> None:
         if to_plot is None:
             to_plot = [
-                da.isel(time=mask[:, i]).mean(dim="time") for i in range(len(self.axes))
+                da.isel(time=mas).mean(dim="time") for mas in mask.T
             ]
         lon = da.lon.values
         lat = da.lat.values
-        n_sam = [np.sum(mask[:, i]) for i in range(len(self.axes))]
+        n_sam = np.sum(mask, axis=0)
         significances = []
-        for i in tqdm.trange(len(self.axes)):
+        for i in tqdm.trange(mask.shape[1]):
             significances.append(
                 field_significance(to_plot[i], da, n_sam[i], n_sel, thresh_up)[int(FDR)]
             )
