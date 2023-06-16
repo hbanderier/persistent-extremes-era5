@@ -43,6 +43,7 @@ from definitions import (
     load_pickle,
     CIequal,
     Cdo,
+    labels_to_mask,
 )
 
 RAW = 0
@@ -78,6 +79,9 @@ def pad_wrap(da: xr.DataArray, dim: str) -> bool:
 
 def window_smoothing(da: xr.DataArray, dim: str, winsize: int) -> xr.DataArray:
     halfwinsize = int(np.ceil(winsize / 2))
+    newchunks = {di: 30 for di in da.dims}
+    newchunks[dim] = -1
+    da = da.chunk(newchunks)
     if pad_wrap(da, dim):
         da = da.pad({dim: halfwinsize}, mode="wrap")
         newda = da.rolling({dim: winsize}, center=True).mean()
@@ -481,13 +485,6 @@ def centers_as_dataarray(
         projection = project_onto_clusters(X, centers)
         labels = cluster_from_projs(projection, neg=neg)
     return labels_to_centers(labels, da, coord)
-
-
-def label_to_mask(labels: xr.DataArray | NDArray) -> NDArray:
-    if isinstance(labels, xr.DataArray):
-        labels = labels.values
-    unique_labels = np.unique(labels)
-    return labels[:, None] == unique_labels[None, :]
 
 
 class ClusteringExperiment(Experiment):

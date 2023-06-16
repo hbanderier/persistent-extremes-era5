@@ -477,7 +477,7 @@ class Clusterplot:
         to_plot: list = None,
         n_sel: int = 100,
         thresh_up: bool = True,
-        FDR: bool = False,
+        FDR: bool = True,
         color: str | list = "black",
         hatch: str = "..",
     ) -> None:

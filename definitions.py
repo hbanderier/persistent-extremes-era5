@@ -3,6 +3,8 @@ import platform
 from time import perf_counter
 
 import numpy as np
+from sklearn.cluster import DBSCAN, AgglomerativeClustering
+from sklearn.metrics import pairwise_distances
 
 try:
     import cupy as cp  # won't work on cpu nodes
@@ -36,7 +38,7 @@ elif pf.find("el7") >= 0:  # find better later
     NODE = "UBELIX"
     DATADIR = "/storage/scratch/users/hb22g102"
     os.environ["CDO"] = "/storage/homefs/hb22g102/mambaforge/envs/env11/bin/cdo"
-    N_WORKERS=16
+    N_WORKERS=8
     MEMORY_LIMIT='4GiB'
     
 CLIMSTOR = "/mnt/climstor/ecmwf/era5/raw"
@@ -368,6 +370,13 @@ def field_significance(to_test: xr.DataArray, take_from: NDArray | xr.DataArray,
     return nocorr, fdrcorr
 
 
+def labels_to_mask(labels: xr.DataArray | NDArray) -> NDArray:
+    if isinstance(labels, xr.DataArray):
+        labels = labels.values
+    unique_labels = np.unique(labels)
+    return labels[:, None] == unique_labels[None, :]
+
+
 def find_jets(X, lon: NDArray, lat: NDArray, height=20, distance=20, width=6, grad=4, juncdistlo=5, juncdistla=6, cutoff=60) -> list:
     jets = []
     for i, x in enumerate(X.T):
@@ -415,10 +424,31 @@ def find_jets(X, lon: NDArray, lat: NDArray, height=20, distance=20, width=6, gr
     return jets
 
 
-def find_all_jets(da: xr.DataArray, X: NDArray = None, processes: int = 8, chunksize: int = 10, **kwargs) -> Tuple[list, xr.DataArray]:
+def find_jets_v2(X, lon: NDArray, lat: NDArray, height=20, distance=40, width=6, eps=0.15, cutoff=1700) -> list:
+    points = []
+    for i, x in enumerate(X.T):
+        lo = lon[i]
+        peaks = find_peaks(x, height=height, distance=distance, width=width)[0]
+        for peak in peaks:
+            points.append([lon[i], lat[peak], x[peak]])
+    points = np.asarray(points)     
+    dist_matrix = pairwise_distances(
+        np.radians(points[:, [1, 0]]), metric='haversine'
+    ) 
+    # / points[:, None, 2] / points[None, :, 2]
+    labels = AgglomerativeClustering(n_clusters=None, distance_threshold=eps, metric='precomputed', linkage='single').fit(dist_matrix).labels_
+    masks = labels_to_mask(labels)
+    jets = []
+    for mask in masks.T:
+        if np.sum(points[mask, 2]) > cutoff:
+            jets.append(points[mask])
+    return jets
+
+
+def find_all_jets(da: xr.DataArray, X: NDArray = None, processes: int = N_WORKERS, chunksize: int = 10, which=1, **kwargs) -> Tuple[list, xr.DataArray]:
     lon = da.lon.values
     lat = da.lat.values
-    func = partial(find_jets, lon=lon, lat=lat, **kwargs)
+    func = partial(find_jets if which == 1 else find_jets_v2, lon=lon, lat=lat, **kwargs)
     if X is None:
         X = da.values
     with Pool(processes=processes) as pool:
@@ -426,21 +456,43 @@ def find_all_jets(da: xr.DataArray, X: NDArray = None, processes: int = 8, chunk
     return alljets
 
 
-def is_double_jet(da: xr.DataArray, alljets: list, eur_thresh: float = 1500) -> xr.DataArray:
-    isdouble = da[:, 0, 0].copy(data=np.zeros(len(da), dtype=bool)).reset_coords(['lon', 'lat'], drop=True)
-    for i, jetlist in enumerate(alljets):
-        props = []
-        for jet in jetlist:
-            meany = np.mean(jet[:, 1])
-            x = jet[:, 0]
-            inteur = np.trapz(jet[x > -10, 2], x=x[x > -10]) > eur_thresh
-            props.append((inteur, meany))
-        count = 0
-        meany = -1000
-        for prop in props:
-            if prop[0] and (np.abs(prop[1] - meany) > 15):
-                meany = prop[1]
-                count += 1
-        isdouble[i] = count > 1
-    return isdouble
-    
+def jet_integral(jet: NDArray) -> float:
+    distances = np.diagonal(pairwise_distances(np.radians(jet[:, :2]), metric='haversine'), offset=1)
+    rprime = np.zeros(len(jet))
+    rprime[:-1] += distances
+    rprime[1:] += distances
+    rprime[1:-1] /= 2.
+    return np.trapz(jet[:, 2] * rprime)
+
+
+def jet_props(jets: list, eur_thresh: float = 19) -> Tuple[list, bool, bool]:
+    props = []
+    count = 1 if len(jets) > 0 else 0
+    count_over_europe = 0
+    to_sort = []
+    for jet in jets:
+        x, y, s = jet.T
+        dic = {}
+        dic['mean_lon'] = np.average(x, weights=s)
+        dic['mean_lat'] = np.average(y, weights=s)
+        try:
+            dic['int_over_europe'] = jet_integral(jet[x > -10])
+        except ValueError:
+            dic['int_over_europe'] = 0
+        dic['int_all'] = jet_integral(jet)
+        to_sort.append(dic['mean_lat'])
+        count += np.any([np.abs(other_dic['mean_lat'] - dic['mean_lat']) > 10 for other_dic in props])
+        count_over_europe += dic['int_over_europe'] > eur_thresh
+        props.append(dic)
+    is_single = count == 1
+    is_double = (count > 1) and (count_over_europe > 1)
+    jets = [jets[i] for i in np.argsort(to_sort)]
+    return jets, props, is_double, is_single
+
+
+def all_jet_props(all_jets: list, processes: int = N_WORKERS, chunk_size: int = 10, eur_thresh: float = 19) -> Tuple[list, NDArray, NDArray]:
+    func = partial(jet_props, eur_thresh=eur_thresh)
+    with Pool(processes=processes) as pool:
+        results = pool.map(func, all_jets, chunksize=chunk_size)
+    all_jets, all_props, is_double, is_single = zip(*results)
+    return all_jets, all_props, np.asarray(is_double), np.asarray(is_single)
