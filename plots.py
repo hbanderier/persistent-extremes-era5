@@ -32,13 +32,21 @@ import cartopy.feature as feat
 from definitions import field_significance, LATBINS, infer_sym
 
 
-COLORS5 = [  # https://coolors.co/palette/ef476f-ffd166-06d6a0-118ab2-073b4c
-    "#ef476f",  # pinky red
-    "#ffd166",  # yellow
-    "#06d6a0",  # cyany green
-    "#118ab2",  # light blue
-    "#073b4c",  # dark blue
-    "#F3722C",  # Orange
+# COLORS5 = [  # https://coolors.co/palette/ef476f-ffd166-06d6a0-118ab2-073b4c
+#     "#ef476f",  # pinky red
+#     "#ffd166",  # yellow
+#     "#06d6a0",  # cyany green
+#     "#118ab2",  # light blue
+#     "#073b4c",  # dark blue
+#     "#F3722C",  # Orange
+# ]
+
+COLORS5 = [
+    '#167e1b',
+    '#8d49c5',
+    '#d2709c',
+    '#c48b45',
+    '#5ccc99',
 ]
 
 COLORS10 = [  # https://coolors.co/palette/f94144-f3722c-f8961e-f9844a-f9c74f-90be6d-43aa8b-4d908e-577590-277da1
@@ -54,6 +62,8 @@ COLORS10 = [  # https://coolors.co/palette/f94144-f3722c-f8961e-f9844a-f9c74f-90
     "#277DA1",  # Night Blue
 ]
 
+MYPURPLES = LinearSegmentedColormap.from_list("mypruples", ['#FFFFFF', '#8338EC'])
+
 COASTLINE = feat.NaturalEarthFeature(
     "physical", "coastline", "110m", edgecolor="black", facecolor="none"
 )
@@ -66,17 +76,35 @@ BORDERS = feat.NaturalEarthFeature(
 )
 
 
+def num2tex(x: float) -> str:
+    float_str = f'{x:.2g}'
+    if 'e' in float_str:
+        base, exponent = float_str.split("e")
+        return r"{0} \times 10^{{{1}}}".format(base, int(exponent))
+    else:
+        return float_str
+
+
 def make_transparent(
-    cmap: str | Colormap, nlev: int = None, alpha_others: float = 1
+    cmap: str | Colormap, nlev: int = None, alpha_others: float = 1, n_transparent: int = 1,
 ) -> Colormap:
     if isinstance(cmap, str):
         cmap = mpl.colormaps[cmap]
     if nlev is None:
         nlev = cmap.N
     colorlist = cmap(np.linspace(0, 1, nlev))
-    colorlist[0, -1] = 0
-    colorlist[1:, -1] = alpha_others
+    colorlist[:n_transparent, -1] = 0
+    colorlist[n_transparent:, -1] = alpha_others
     return ListedColormap(colorlist)
+
+
+def num2tex(x: float) -> str:
+    float_str = f'{x:.2g}'
+    if 'e' in float_str:
+        base, exponent = float_str.split("e")
+        return r"{0} \times 10^{{{1}}}".format(base, int(exponent))
+    else:
+        return float_str
 
 
 def make_boundary_path(
@@ -241,7 +269,10 @@ def doubleit(thing: list | str | None, length: int, default: str) -> list:
         return [thing] * length
     elif isinstance(thing, list):
         lover2 = int(length / 2)
-        return lover2 * [thing[0]] + (lover2 + 1) * [thing[1]]
+        if len(thing) == 3:
+            return lover2 * [thing[0]] + (length % 2) * [thing[1]] + (lover2) * [thing[2]]
+        else:
+            return lover2 * [thing[0]] + (length % 2) * [default] + (lover2) * [thing[1]]
     else:
         return [default] * length
 
@@ -276,6 +307,7 @@ class Clusterplot:
                 / (self.maxlon - self.minlon)
                 * self.nrow
                 / (self.ncol + (0.5 if honeycomb else 0))
+                * 0.8 # for the colorbar padding
             )
         if honeycomb:
             self.fig, self.axes = honeycomb_panel(
@@ -335,7 +367,7 @@ class Clusterplot:
         for title, ax in zip(titles, self.axes):
             if isinstance(title, float):
                 title = f"{title:.2f}"
-            ax.set_title(title)
+            ax.set_title(title, y=0.0)
 
     def add_contour(
         self,
@@ -360,7 +392,7 @@ class Clusterplot:
             linestyles = ['dashed', 'solid']
             
         if sym:
-            colors = doubleit(colors, len(levelsc), "k")
+            colors = doubleit(colors, len(levelsc), "black")
             linestyles = doubleit(linestyles, len(levelsc), "solid")
 
         if not sym and colors is None:
@@ -377,7 +409,7 @@ class Clusterplot:
                 levels=levelsc,
                 colors=colors,
                 linestyles=linestyles,
-                linewidths=1.5,
+                linewidths=2.0,
                 **kwargs,
             )
 
@@ -401,7 +433,7 @@ class Clusterplot:
         nlevels: int = None,
         sym: bool = None,
         cmap: str | Colormap = None,
-        transparify: bool | float = False,
+        transparify: bool | float | int = False,
         contours: bool = False,
         clabels: Union[bool, list] = None,
         draw_gridlines: bool = False,
@@ -420,11 +452,13 @@ class Clusterplot:
         if cmap is None and sym:
             cmap = "bwr"
         elif cmap is None:
-            cmap = "BuPu"  # Just think it's neat
+            cmap = MYPURPLES  # Just think it's neat
         if isinstance(cmap, str):
             cmap = mpl.colormaps[cmap]
         if transparify and not sym:
-            if isinstance(transparify, float):
+            if isinstance(transparify, int):
+                cmap = make_transparent(cmap, nlev=len(levelscf), n_transparent=transparify)
+            elif isinstance(transparify, float):
                 cmap = make_transparent(cmap, nlev=len(levelscf), alpha_others=transparify)
             else:
                 cmap = make_transparent(cmap, nlev=len(levelscf))
@@ -474,24 +508,22 @@ class Clusterplot:
         self,
         da: DataArray,
         mask: NDArray,
-        to_plot: list = None,
-        n_sel: int = 100,
-        thresh_up: bool = True,
         FDR: bool = True,
         color: str | list = "black",
         hatch: str = "..",
     ) -> None:
-        if to_plot is None:
-            to_plot = [
-                da.isel(time=mas).mean(dim="time") for mas in mask.T
-            ]
+        to_test = [
+            da.isel(time=mas) for mas in mask.T
+        ]
+        
         lon = da.lon.values
         lat = da.lat.values
-        n_sam = np.sum(mask, axis=0)
         significances = []
+        da = da.values
+        # da = np.sort(da, axis=0)
         for i in tqdm.trange(mask.shape[1]):
             significances.append(
-                field_significance(to_plot[i], da, n_sam[i], n_sel, thresh_up)[int(FDR)]
+                field_significance(to_test[i], da, 20, q=0.02)[int(FDR)]
             )
 
         for ax, signif in zip(self.axes, significances):
@@ -513,7 +545,7 @@ class Clusterplot:
         da: DataArray,
         mask: NDArray,
         type: str = "contourf",
-        stippling: bool = False,
+        stippling: bool | str = False,
         nlevels: int = None,
         sym: bool = None,
         transparify: bool | float = False,
@@ -573,7 +605,11 @@ class Clusterplot:
                 f'Wrong {type=}, choose among "contourf", "contour" or "both"'
             )
         if stippling:
-            self.add_stippling(da, mask, to_plot)
+            if isinstance(stippling, str):
+                color = stippling
+            else:
+                color = 'black'
+            self.add_stippling(da, mask, color=color)
         return im
 
     def cluster_on_fig(
@@ -590,23 +626,26 @@ class Clusterplot:
         if isinstance(cmap, str):
             cmap = mpl.colormaps[cmap]
         nabove = np.sum(unique_labs > 0)
-        if sym:
-            nbelow = np.sum(unique_labs < 0)
-            cab = np.linspace(1, 0.66, nabove)
-            cbe = np.linspace(0.33, 0, nbelow)
-            if 0 in unique_labs:
-                zerocol = [0.5]
-            else:
-                zerocol = []
-            colors = [*cbe, *zerocol, *cab]
+        if isinstance(cmap, list | NDArray):
+            colors = cmap
         else:
-            if 0 in unique_labs:
-                zerocol = [0.0]
+            if sym:
+                nbelow = np.sum(unique_labs < 0)
+                cab = np.linspace(1, 0.66, nabove)
+                cbe = np.linspace(0.33, 0, nbelow)
+                if 0 in unique_labs:
+                    zerocol = [0.5]
+                else:
+                    zerocol = []
+                colors = [*cbe, *zerocol, *cab]
             else:
-                zerocol = []
-            colors = np.linspace(1.0, 0.33, nabove)
-            colors = [*zerocol, *colors]
-        colors = cmap(colors)
+                if 0 in unique_labs:
+                    zerocol = [0.0]
+                else:
+                    zerocol = []
+                colors = np.linspace(1.0, 0.33, nabove)
+                colors = [*zerocol, *colors]
+            colors = cmap(colors)
 
         xmin, ymin = self.axes[0].get_position().xmin, self.axes[0].get_position().ymin
         xmax, ymax = (
@@ -620,7 +659,7 @@ class Clusterplot:
         dy = (coords[2, 1] - coords[0, 1]) / 2
         for coord, val in zip(coords, clu_labs):
             newcs = [
-                [coord[0] + sgnx * dx / 2.2, coord[1] + sgny * dy / 2.2]
+                [coord[0] + sgnx * dx / 2.01, coord[1] + sgny * dy / 2.01]
                 for sgnx, sgny in product([-1, 0, 1], [-1, 0, 1])
             ]
             coords = np.append(coords, newcs, axis=0)
@@ -634,13 +673,13 @@ class Clusterplot:
             r = interp(*np.meshgrid(x, y))
 
             if lab == 0:
-                iter = contour_generator(x, y, r).filled(0.6, 1)[0]
+                iter = contour_generator(x, y, r).filled(0.99, 1)[0]
                 ls = "none"
                 fc = "black"
                 alpha = 0.2
                 ec = "none"
             else:
-                iter = contour_generator(x, y, r).lines(0.6)
+                iter = contour_generator(x, y, r).lines(0.99)
                 ls = "solid" if lab >= 0 else "dashed"
                 alpha = 1
                 fc = "none"

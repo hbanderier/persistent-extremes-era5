@@ -27,20 +27,20 @@ pf = platform.platform()
 if pf.find("cray") >= 0:
     NODE = "DAINT"
     DATADIR = "/scratch/snx3000/hbanderi/data/persistent"
-    N_WORKERS=16
-    MEMORY_LIMIT='4GiB'
+    N_WORKERS = 16
+    MEMORY_LIMIT = "4GiB"
 elif platform.node()[:4] == "clim":
     NODE = "CLIM"
     DATADIR = "/scratch2/hugo"
-    N_WORKERS=8
-    MEMORY_LIMIT='4GiB'
+    N_WORKERS = 8
+    MEMORY_LIMIT = "4GiB"
 elif pf.find("el7") >= 0:  # find better later
     NODE = "UBELIX"
     DATADIR = "/storage/scratch/users/hb22g102"
     os.environ["CDO"] = "/storage/homefs/hb22g102/mambaforge/envs/env11/bin/cdo"
-    N_WORKERS=8
-    MEMORY_LIMIT='4GiB'
-    
+    N_WORKERS = 8
+    MEMORY_LIMIT = "4GiB"
+
 CLIMSTOR = "/mnt/climstor/ecmwf/era5/raw"
 
 DATERANGEPL = pd.date_range("19590101", "20211231")
@@ -72,11 +72,14 @@ ZOO = [
     "Mea",
 ]
 
-REGIONS = [
-    "South", "West", "Balkans", "Scandinavia", "Russia", "Arctic"
-]
+REGIONS = ["South", "West", "Balkans", "Scandinavia", "Russia", "Arctic"]
 
-SMALLNAME = {"Geopotential": "z", "Wind": "s", "Temperature": "t", "Precipitation": "tp"}  # Wind speed
+SMALLNAME = {
+    "Geopotential": "z",
+    "Wind": "s",
+    "Temperature": "t",
+    "Precipitation": "tp",
+}  # Wind speed
 
 RADIUS = 6.371e6  # m
 OMEGA = 7.2921e-5  # rad.s-1
@@ -133,7 +136,7 @@ def fn(date: Union[list, NDArray, pd.DatetimeIndex, pd.Timestamp], which):
         return _fn(date, which)
     else:
         raise TypeError(f"Invalid type : {type(date)}")
-    
+
 
 def degcos(x: float) -> float:
     return np.cos(x / 180 * np.pi)
@@ -167,7 +170,13 @@ def CIequal(str1: str, str2: str) -> bool:
     return str1.casefold() == str2.casefold()
 
 
-def hotspells_mask(filename: str = 'hotspells.csv', daysbefore: int = 21, daysafter: int = 5, timerange: NDArray | pd.DatetimeIndex | xr.DataArray = None, names: Iterable = None) -> xr.DataArray:
+def hotspells_mask(
+    filename: str = "hotspells.csv",
+    daysbefore: int = 21,
+    daysafter: int = 5,
+    timerange: NDArray | pd.DatetimeIndex | xr.DataArray = None,
+    names: Iterable = None,
+) -> xr.DataArray:
     """Returns timeseries mask of hotspells in several regions in `timerange` as a xr.DataArray with two dimensions and coordinates. It has shape (len(timerange), n_regions). n_regions is either inferred from the file or from the len of names if it is provided
 
     Args:
@@ -189,14 +198,11 @@ def hotspells_mask(filename: str = 'hotspells.csv', daysbefore: int = 21, daysaf
             timerange = timerange.values
         except AttributeError:
             pass
-        timerange = pd.DatetimeIndex(timerange).floor(freq='1D')
+        timerange = pd.DatetimeIndex(timerange).floor(freq="1D")
     list_of_dates = np.loadtxt(filename, delimiter=",", dtype=np.datetime64)
-    assert(len(names) == list_of_dates.shape[1])
+    assert len(names) == list_of_dates.shape[1]
     data = np.zeros((len(timerange), len(names)), dtype=bool)
-    coords = {
-        'time': timerange,
-        'region': names
-    }
+    coords = {"time": timerange, "region": names}
     data = xr.DataArray(data, coords=coords)
     for i, dates in enumerate(list_of_dates.T):
         dates = np.sort(dates)
@@ -210,7 +216,9 @@ def hotspells_mask(filename: str = 'hotspells.csv', daysbefore: int = 21, daysaf
     return data
 
 
-def get_hostpells_v2(filename: str = 'hotspells_v2.csv', lag_behind: int = 10, regions: list = None) -> list:
+def get_hostpells_v2(
+    filename: str = "hotspells_v2.csv", lag_behind: int = 10, regions: list = None
+) -> list:
     if regions is None:
         regions = REGIONS
     hotspells_raw = pd.read_csv(filename)
@@ -219,18 +227,25 @@ def get_hostpells_v2(filename: str = 'hotspells_v2.csv', lag_behind: int = 10, r
     maxnhs = 0
     for i, key in enumerate(regions):
         hotspells.append([])
-        for line in hotspells_raw[f'dates{i + 1}']:
-            if line == '-999':
+        for line in hotspells_raw[f"dates{i + 1}"]:
+            if line == "-999":
                 continue
-            dateb, datee = [np.datetime64(d) for d in line.split('/')]
-            dateb -= np.timedelta64(lag_behind, 'D')
-            hotspells[-1].append(pd.date_range(dateb, datee, freq='1D'))
+            dateb, datee = [np.datetime64(d) for d in line.split("/")]
+            dateb -= np.timedelta64(lag_behind, "D")
+            hotspells[-1].append(pd.date_range(dateb, datee, freq="1D"))
             maxlen = max(maxlen, len(hotspells[-1][-1]))
         maxnhs = max(maxnhs, len(hotspells[-1]))
     return hotspells, maxnhs, maxlen
 
 
-def apply_hotspells_mask_v2(hotspells: list, da: xr.DataArray, maxlen: int = None, maxnhs: int = None, regions: list = None, lag_behind: int = 10) -> xr.DataArray:
+def apply_hotspells_mask_v2(
+    hotspells: list,
+    da: xr.DataArray,
+    maxlen: int = None,
+    maxnhs: int = None,
+    regions: list = None,
+    lag_behind: int = 10,
+) -> xr.DataArray:
     if regions is None:
         regions = REGIONS
     assert len(regions) == len(hotspells)
@@ -244,15 +259,20 @@ def apply_hotspells_mask_v2(hotspells: list, da: xr.DataArray, maxlen: int = Non
     data = np.zeros((da.shape[1], len(hotspells), maxnhs, maxlen))
     data[:] = np.nan
     da_masked = xr.DataArray(
-        data, 
+        data,
         coords={
-            list(da.coords)[1]: np.arange(da.shape[1]), 'region': regions, 'hotspell': np.arange(maxnhs), 'day_after_beg': np.arange(maxlen) - lag_behind,
+            list(da.coords)[1]: np.arange(da.shape[1]),
+            "region": regions,
+            "hotspell": np.arange(maxnhs),
+            "day_after_beg": np.arange(maxlen) - lag_behind,
         },
     )
     for i, regionhs in enumerate(hotspells):
         for j, hotspell in enumerate(regionhs):
             try:
-                da_masked[:, i, j, :len(hotspell)] = da.sel(time=hotspells[i][j].values).values.T
+                da_masked[:, i, j, : len(hotspell)] = da.sel(
+                    time=hotspells[i][j].values
+                ).values.T
             except KeyError:
                 ...
     return da_masked
@@ -315,58 +335,136 @@ def infer_sym(to_plot: Any) -> bool:
     return (np.sign(max) == -np.sign(min)) and (
         np.abs(np.log10(np.abs(max)) - np.log10(np.abs(min))) <= 1
     )
-    
 
-def searchsortednd(a: NDArray, v: NDArray, **kwargs) -> NDArray:  # https://stackoverflow.com/questions/40588403/vectorized-searchsorted-numpy + reshapes
-    orig_shapex, nx = v.shape[:-1], v.shape[-1]
-    orig_shapea, na = a.shape[:-1], a.shape[-1]
-    assert np.all(orig_shapex == orig_shapea)
-    
+
+def searchsortednd(
+    a: NDArray, x: NDArray, **kwargs
+) -> (
+    NDArray
+):  # https://stackoverflow.com/questions/40588403/vectorized-searchsorted-numpy + reshapes
+    orig_shapex, nx = x.shape[1:], x.shape[0]
+    _, na = a.shape[1:], a.shape[0]
     m = np.prod(orig_shapex)
-    a = a.reshape(m, na)
-    v = v.reshape(m, nx)
-    max_num = np.maximum(np.nanmax(a) - np.nanmin(a), np.nanmax(v) - np.nanmin(v)) + 1
-    r = max_num * np.arange(m)[:, None]
-    p = np.searchsorted((a + r).ravel(), (v + r).ravel(), side="left", **kwargs).reshape(m, -1)
-    return (p - na * (np.arange(m)[:, None])).reshape((*orig_shapex, -1))
+    a = a.reshape(na, m)
+    x = x.reshape(nx, m)
+    max_num = np.maximum(np.nanmax(a) - np.nanmin(a), np.nanmax(x) - np.nanmin(x)) + 1
+    r = max_num * np.arange(m)[None, :]
+    p = (
+        np.searchsorted((a + r).ravel(order="F"), (x + r).ravel(order="F"), side="left")
+        .reshape(m, nx)
+        .T
+    )
+    return (p - na * (np.arange(m)[None, :])).reshape((nx, *orig_shapex))
 
 
-def field_significance(to_test: xr.DataArray, take_from: NDArray | xr.DataArray, n_sam: int, n_sel: int = 100, thresh_up=True) -> Tuple[xr.DataArray, xr.DataArray]:
-    indices = np.random.rand(n_sel, take_from.shape[0]).argpartition(n_sam, axis=1)[:, :n_sam]
-    to_test = np.abs(to_test)
-    if isinstance(take_from, xr.DataArray):
-        take_from = take_from.values
-    empirical_distribution = []
-    cs = 500
-    for ns in range(0, n_sam, cs):
-        end = min(ns + cs, n_sam)
-        empirical_distribution.append(np.mean(np.take(take_from, indices[:, ns:end], axis=0), axis=1))
-    empirical_distribution = np.abs(np.mean(empirical_distribution, axis=0))
-    sym = infer_sym(empirical_distribution)
-    q = 0.975 if sym else 0.95
-    nocorr = to_test > np.quantile(empirical_distribution, q=q, axis=0)
+# def field_significance(to_test: xr.DataArray, take_from: NDArray | xr.DataArray, n_sam: int, n_sel: int = 200, thresh_up=True, q=0.98) -> Tuple[xr.DataArray, xr.DataArray]:
+#     indices = np.random.rand(n_sel, take_from.shape[0]).argpartition(n_sam, axis=1)[:, :n_sam]
+#     to_test = np.abs(to_test)
+#     if isinstance(take_from, xr.DataArray):
+#         take_from = take_from.values
+#     empirical_distribution = []
+#     cs = 500
+#     for ns in range(0, n_sam, cs):
+#         end = min(ns + cs, n_sam)
+#         empirical_distribution.append(np.mean(np.take(take_from, indices[:, ns:end], axis=0), axis=1))
+#     sym = infer_sym(empirical_distribution)
+#     empirical_distribution = np.abs(np.mean(empirical_distribution, axis=0))
+#     q = 1 - (1 - q) / 2 if sym else q
+#     nocorr = to_test > np.quantile(empirical_distribution, q=q, axis=0)
 
-    # FDR correction
-    idxs = np.argsort(empirical_distribution, axis=0)
-    xcdf = np.take_along_axis(empirical_distribution, idxs, axis=0)
-    ycdf = np.cumsum(idxs, axis=0) / np.sum(idxs, axis=0)
-    ss = searchsortednd(xcdf.transpose((1, 2, 0)), to_test.values[:, :, None])
-    ss[ss == n_sel] = n_sel - 1
-    p = np.take_along_axis(ycdf.transpose((1, 2, 0)), ss, axis=-1).flatten()
+#     # FDR correction
+#     idxs = np.argsort(empirical_distribution, axis=0)
+#     xcdf = np.take_along_axis(empirical_distribution, idxs, axis=0)
+#     ycdf = np.cumsum(idxs, axis=0) / np.sum(idxs, axis=0)
+#     ss = searchsortednd(xcdf.transpose((1, 2, 0)), to_test.values[:, :, None])
+#     ss[ss == n_sel] = n_sel - 1
+#     p = np.take_along_axis(ycdf.transpose((1, 2, 0)), ss, axis=-1).flatten()
+#     argp = np.argsort(p)
+#     p = p[argp]
+#     numvalid = len(p)
+#     bh_line = (1 - q) * 2 * np.arange(1, numvalid + 1) / numvalid
+#     fdrcorr = np.zeros(len(p), dtype=bool)
+#     if thresh_up:
+#         above = ((1 - p)[::-1] < bh_line)[::-1]
+#         c = np.argmax(above)
+#         fdrcorr[argp[:c]] = True
+#     else:
+#         under = p < bh_line
+#         c = len(under) - np.argmax(under[::-1]) - 1
+#         fdrcorr[argp[-c:]] = True
+#     fdrcorr = to_test.copy(data=fdrcorr.reshape(to_test.shape))
+#     return nocorr, fdrcorr
+
+
+def fdr_correction(p: NDArray, q: float = 0.02):
+    pshape = p.shape
+    p = p.ravel()
     argp = np.argsort(p)
     p = p[argp]
-    numvalid = len(p)
-    bh_line = (1 - q) * 2 * np.arange(1, numvalid + 1) / numvalid
-    fdrcorr = np.zeros(len(p), dtype=bool)
-    if thresh_up:
-        above = ((1 - p)[::-1] < bh_line)[::-1]
-        c = np.argmax(above)
-        fdrcorr[argp[c:]] = True
+    bh_line = q * np.arange(1, p.size + 1) / (p.size + 1)
+    c = p.size - np.argmax(bh_line[::-1] > p[::-1])
+    fdrcorr = np.zeros(len(p), dtype=int)
+    fdrcorr[argp[:c]] = 1
+    return fdrcorr.reshape(pshape)
+
+
+def one_ks_cumsum(b: NDArray, a: NDArray, q: float = 0.02, n_sam: int = None):
+    if n_sam is None:
+        n_sam = len(a)
+    x = np.concatenate([a, b], axis=0)
+    idxs_ks = np.argsort(x, axis=0)
+    y1 = np.cumsum(idxs_ks < n_sam, axis=0) / n_sam
+    y2 = np.cumsum(idxs_ks >= n_sam, axis=0) / n_sam
+    d = np.amax(np.abs(y1 - y2), axis=0)
+    p = np.exp(-(d**2) * n_sam)
+    nocorr = (p < q).astype(int)
+    return nocorr, fdr_correction(p, q)
+
+
+def one_ks_searchsorted(b: NDArray, a: NDArray, q: float = 0.02, n_sam: int = None):
+    if n_sam is None:
+        n_sam = len(a)
+    x = np.concatenate([a, b], axis=0)
+    idxs_ks = np.argsort(x, axis=0)
+    y1 = np.cumsum(idxs_ks < n_sam, axis=0) / n_sam
+    y2 = np.cumsum(idxs_ks >= n_sam, axis=0) / n_sam
+    d = np.amax(np.abs(y1 - y2), axis=0)
+    p = np.exp(-(d**2) * n_sam)
+    nocorr = (p < q).astype(int)
+    return nocorr, fdr_correction(p, q)
+
+
+def field_significance(
+    to_test: xr.DataArray,
+    take_from: NDArray,
+    n_sel: int = 100,
+    q: float = 0.02,
+    method: str = "cumsum",
+    processes: int = N_WORKERS,
+    chunksize: int = 2,
+) -> Tuple[xr.DataArray, xr.DataArray]:
+    # commented lines correspond to the slower searchsorted implementation. Currently using slightly less robust cumsum implementation
+    nocorr = np.zeros((take_from.shape[1:]), dtype=int)
+    fdrcorr = np.zeros((take_from.shape[1:]), dtype=int)
+    a = to_test.values
+    if method == "searchsorted":
+        a = np.sort(a, axis=0)
+        # b should be sorted as well but it's expensive to do it here, instead sort take_from before calling (since it's usually needed in many calls)
+    n_sam = len(a)
+    indices = np.random.rand(n_sel, take_from.shape[0]).argpartition(n_sam, axis=1)[
+        :, :n_sam
+    ]
+    if method == "searchsorted":
+        indices = np.sort(indices, axis=1)
+        func = partial(one_ks_searchsorted, a=a, q=q, n_sam=n_sam)
     else:
-        under = p < bh_line
-        c = len(under) - np.argmax(under[::-1]) - 1
-        fdrcorr[argp[:c]] = True
-    fdrcorr = to_test.copy(data=fdrcorr.reshape(to_test.shape))
+        func = partial(one_ks_cumsum, a=a, q=q, n_sam=n_sam)
+        
+    with Pool(processes=processes) as pool:
+        results = pool.map(func, (take_from[indices_] for indices_ in indices), chunksize=chunksize)
+    nocorr, fdrcorr = zip(*results)
+    nocorr = to_test[0].copy(data=np.sum(nocorr, axis=0) > (1 - q) * n_sel)
+    fdrcorr = to_test[0].copy(data=np.sum(fdrcorr, axis=0) > (1 - q) * n_sel)
     return nocorr, fdrcorr
 
 
@@ -377,7 +475,18 @@ def labels_to_mask(labels: xr.DataArray | NDArray) -> NDArray:
     return labels[:, None] == unique_labels[None, :]
 
 
-def find_jets(X, lon: NDArray, lat: NDArray, height=20, distance=20, width=6, grad=4, juncdistlo=5, juncdistla=6, cutoff=60) -> list:
+def find_jets(
+    X,
+    lon: NDArray,
+    lat: NDArray,
+    height=20,
+    distance=20,
+    width=6,
+    grad=4,
+    juncdistlo=5,
+    juncdistla=6,
+    cutoff=60,
+) -> list:
     jets = []
     for i, x in enumerate(X.T):
         lo = lon[i]
@@ -391,7 +500,7 @@ def find_jets(X, lon: NDArray, lat: NDArray, height=20, distance=20, width=6, gr
                     break
             if not found:
                 jets.append([(lo, la, sp)])
-    
+
     jets = [np.asarray(jet) for jet in jets]
     jets = [jet[np.argsort(jet[:, 0])] for jet in jets]
     done = False
@@ -420,23 +529,40 @@ def find_jets(X, lon: NDArray, lat: NDArray, height=20, distance=20, width=6, gr
     for i in range(len(jets) - 1, -1, -1):
         if len(jets[i]) < cutoff:
             del jets[i]
-    
+
     return jets
 
 
-def find_jets_v2(X, lon: NDArray, lat: NDArray, height=20, distance=40, width=6, eps=0.15, cutoff=1700) -> list:
+def find_jets_v2(
+    X,
+    lon: NDArray,
+    lat: NDArray,
+    height=20,
+    distance=40,
+    width=6,
+    eps=0.15,
+    cutoff=1700,
+) -> list:
     points = []
     for i, x in enumerate(X.T):
         lo = lon[i]
         peaks = find_peaks(x, height=height, distance=distance, width=width)[0]
         for peak in peaks:
-            points.append([lon[i], lat[peak], x[peak]])
-    points = np.asarray(points)     
-    dist_matrix = pairwise_distances(
-        np.radians(points[:, [1, 0]]), metric='haversine'
-    ) 
-    # / points[:, None, 2] / points[None, :, 2]
-    labels = AgglomerativeClustering(n_clusters=None, distance_threshold=eps, metric='precomputed', linkage='single').fit(dist_matrix).labels_
+            points.append([lo, lat[peak], x[peak]])
+    if len(points) == 0:
+        return []
+    points = np.atleast_2d(points)
+    dist_matrix = pairwise_distances(np.radians(points[:, [1, 0]]), metric="haversine")
+    labels = (
+        AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=eps,
+            metric="precomputed",
+            linkage="single",
+        )
+        .fit(dist_matrix)
+        .labels_
+    )
     masks = labels_to_mask(labels)
     jets = []
     for mask in masks.T:
@@ -445,10 +571,19 @@ def find_jets_v2(X, lon: NDArray, lat: NDArray, height=20, distance=40, width=6,
     return jets
 
 
-def find_all_jets(da: xr.DataArray, X: NDArray = None, processes: int = N_WORKERS, chunksize: int = 10, which=1, **kwargs) -> Tuple[list, xr.DataArray]:
+def find_all_jets(
+    da: xr.DataArray,
+    X: NDArray = None,
+    processes: int = N_WORKERS,
+    chunksize: int = 10,
+    which=2,
+    **kwargs,
+) -> Tuple[list, xr.DataArray]:
     lon = da.lon.values
     lat = da.lat.values
-    func = partial(find_jets if which == 1 else find_jets_v2, lon=lon, lat=lat, **kwargs)
+    func = partial(
+        find_jets if which == 1 else find_jets_v2, lon=lon, lat=lat, **kwargs
+    )
     if X is None:
         X = da.values
     with Pool(processes=processes) as pool:
@@ -456,16 +591,20 @@ def find_all_jets(da: xr.DataArray, X: NDArray = None, processes: int = N_WORKER
     return alljets
 
 
+# def jet_integral(jet: NDArray) -> float:
+#     distances = np.diagonal(pairwise_distances(np.radians(jet[:, :2]), metric='haversine'), offset=1)
+#     rprime = np.zeros(len(jet))
+#     rprime[:-1] += distances
+#     rprime[1:] += distances
+#     rprime[1:-1] /= 2.
+#     return np.trapz(jet[:, 2] * rprime)
+
+
 def jet_integral(jet: NDArray) -> float:
-    distances = np.diagonal(pairwise_distances(np.radians(jet[:, :2]), metric='haversine'), offset=1)
-    rprime = np.zeros(len(jet))
-    rprime[:-1] += distances
-    rprime[1:] += distances
-    rprime[1:-1] /= 2.
-    return np.trapz(jet[:, 2] * rprime)
+    return np.trapz(jet[:, 2])  # will fix the other one soon
 
 
-def jet_props(jets: list, eur_thresh: float = 19) -> Tuple[list, bool, bool]:
+def compute_jet_props(jets: list, eur_thresh: float = 19) -> Tuple[list, bool, bool]:
     props = []
     count = 1 if len(jets) > 0 else 0
     count_over_europe = 0
@@ -473,25 +612,37 @@ def jet_props(jets: list, eur_thresh: float = 19) -> Tuple[list, bool, bool]:
     for jet in jets:
         x, y, s = jet.T
         dic = {}
-        dic['mean_lon'] = np.average(x, weights=s)
-        dic['mean_lat'] = np.average(y, weights=s)
+        dic["mean_lon"] = np.average(x, weights=s)
+        dic["mean_lat"] = np.average(y, weights=s)
         try:
-            dic['int_over_europe'] = jet_integral(jet[x > -10])
+            dic["int_over_europe"] = jet_integral(jet[x > -10])
         except ValueError:
-            dic['int_over_europe'] = 0
-        dic['int_all'] = jet_integral(jet)
-        to_sort.append(dic['mean_lat'])
-        count += np.any([np.abs(other_dic['mean_lat'] - dic['mean_lat']) > 10 for other_dic in props])
-        count_over_europe += dic['int_over_europe'] > eur_thresh
+            dic["int_over_europe"] = 0
+        dic["int_all"] = jet_integral(jet)
+        to_sort.append(dic["mean_lat"])
+        count += np.any(
+            [
+                np.abs(other_dic["mean_lat"] - dic["mean_lat"]) > 15
+                for other_dic in props
+            ]
+        )
+        count_over_europe += dic["int_over_europe"] > eur_thresh
         props.append(dic)
     is_single = count == 1
     is_double = (count > 1) and (count_over_europe > 1)
-    jets = [jets[i] for i in np.argsort(to_sort)]
+    sorted_order = np.argsort(to_sort)
+    jets = [jets[i] for i in sorted_order]
+    props = [props[i] for i in sorted_order]
     return jets, props, is_double, is_single
 
 
-def all_jet_props(all_jets: list, processes: int = N_WORKERS, chunk_size: int = 10, eur_thresh: float = 19) -> Tuple[list, NDArray, NDArray]:
-    func = partial(jet_props, eur_thresh=eur_thresh)
+def compute_all_jet_props(
+    all_jets: list,
+    processes: int = N_WORKERS,
+    chunk_size: int = 10,
+    eur_thresh: float = 19,
+) -> Tuple[list, NDArray, NDArray]:
+    func = partial(compute_jet_props, eur_thresh=eur_thresh)
     with Pool(processes=processes) as pool:
         results = pool.map(func, all_jets, chunksize=chunk_size)
     all_jets, all_props, is_double, is_single = zip(*results)

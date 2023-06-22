@@ -440,7 +440,6 @@ def cluster_from_projs(
         X[:, 1::2] = X2
     else:
         X = X1
-    print(X2 is not None, neg, adjust)
     sigma = np.std(X, ddof=1)
     if neg:
         max_weight = np.argmax(np.abs(X), axis=1)

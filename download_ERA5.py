@@ -8,7 +8,7 @@ import cdsapi
 def main():
     c = cdsapi.Client()
     for year in range(1940, 2023):
-        if os.path.isfile(f'{DATADIR}/ERA5/Wind/Multi/raw/{year}.nc'):
+        if os.path.isfile(f'{DATADIR}/ERA5/Wind/Multi/raw/v/{year}.nc'):
             continue
         c.retrieve(
             'reanalysis-era5-pressure-levels',
@@ -47,7 +47,7 @@ def main():
                 'grid': '0.5/0.5',
                 'format': 'netcdf',
             },
-            f'{DATADIR}/ERA5/Wind/Multi/raw/{year}.nc')
+            f'{DATADIR}/ERA5/Wind/Multi/raw/v/{year}.nc')
         
 
 if __name__ == '__main__':
