@@ -1,3 +1,4 @@
+from ast import Attribute
 import os
 import platform
 from time import perf_counter
@@ -332,9 +333,13 @@ def Hurst_exponent(path: Path, subdivs: int = 11) -> Path:
 def infer_sym(to_plot: Any) -> bool:
     max = np.amax(to_plot)
     min = np.amin(to_plot)
-    return (np.sign(max) == -np.sign(min)) and (
+    sym = (np.sign(max) == -np.sign(min)) and (
         np.abs(np.log10(np.abs(max)) - np.log10(np.abs(min))) <= 1
     )
+    try:
+        return sym.item()
+    except AttributeError:
+        return sym
 
 
 def searchsortednd(

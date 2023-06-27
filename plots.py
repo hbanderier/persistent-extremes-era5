@@ -26,6 +26,7 @@ from matplotlib.colors import (
 )
 from matplotlib.container import BarContainer
 from matplotlib.gridspec import GridSpec
+import seaborn as sns
 import cartopy.crs as ccrs
 import cartopy.feature as feat
 
@@ -75,6 +76,8 @@ BORDERS = feat.NaturalEarthFeature(
     facecolor="none",
 )
 
+COLOR_JETS = sns.cubehelix_palette(start=1.05, rot=1.5, light=.55, dark=.2, hue=2)
+
 
 def num2tex(x: float) -> str:
     float_str = f'{x:.2g}'
@@ -86,15 +89,22 @@ def num2tex(x: float) -> str:
 
 
 def make_transparent(
-    cmap: str | Colormap, nlev: int = None, alpha_others: float = 1, n_transparent: int = 1,
+    cmap: str | Colormap, nlev: int = None, alpha_others: float = 1, n_transparent: int = 1, sym: bool = False,
 ) -> Colormap:
     if isinstance(cmap, str):
         cmap = mpl.colormaps[cmap]
     if nlev is None:
         nlev = cmap.N
-    colorlist = cmap(np.linspace(0, 1, nlev))
-    colorlist[:n_transparent, -1] = 0
-    colorlist[n_transparent:, -1] = alpha_others
+    colorlist = cmap(np.linspace(0, 1, nlev + sym))
+    if sym:
+        midpoint = int(np.ceil(nlev / 2))
+        colorlist[midpoint - n_transparent + 1: midpoint + n_transparent, -1] = 0
+        colorlist[midpoint + n_transparent:, -1] = alpha_others
+        colorlist[:midpoint - n_transparent + 1, -1] = alpha_others
+    else:
+        colorlist[:n_transparent, -1] = 0
+        colorlist[n_transparent:, -1] = alpha_others
+    
     return ListedColormap(colorlist)
 
 
@@ -367,7 +377,7 @@ class Clusterplot:
         for title, ax in zip(titles, self.axes):
             if isinstance(title, float):
                 title = f"{title:.2f}"
-            ax.set_title(title, y=0.0)
+            ax.set_title(title)
 
     def add_contour(
         self,
@@ -455,13 +465,13 @@ class Clusterplot:
             cmap = MYPURPLES  # Just think it's neat
         if isinstance(cmap, str):
             cmap = mpl.colormaps[cmap]
-        if transparify and not sym:
+        if transparify:
             if isinstance(transparify, int):
-                cmap = make_transparent(cmap, nlev=len(levelscf), n_transparent=transparify)
+                cmap = make_transparent(cmap, nlev=len(levelscf), n_transparent=transparify, sym=sym)
             elif isinstance(transparify, float):
-                cmap = make_transparent(cmap, nlev=len(levelscf), alpha_others=transparify)
+                cmap = make_transparent(cmap, nlev=len(levelscf), alpha_others=transparify, sym=sym)
             else:
-                cmap = make_transparent(cmap, nlev=len(levelscf))
+                cmap = make_transparent(cmap, nlev=len(levelscf), sym=sym)
 
         norm = BoundaryNorm(levelscf, cmap.N, extend=extend)
         im = ScalarMappable(norm=norm, cmap=cmap)
