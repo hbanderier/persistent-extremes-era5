@@ -41,6 +41,12 @@ elif pf.find("el7") >= 0:  # find better later
     os.environ["CDO"] = "/storage/homefs/hb22g102/mambaforge/envs/env11/bin/cdo"
     N_WORKERS = 8
     MEMORY_LIMIT = "4GiB"
+else:
+    NODE = "LOCAL"
+    N_WORKERS = 8
+    DATADIR = "../data"
+    MEMORY_LIMIT = "2GiB"
+    
 
 CLIMSTOR = "/mnt/climstor/ecmwf/era5/raw"
 
