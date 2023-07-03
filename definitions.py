@@ -39,7 +39,7 @@ elif pf.find("el7") >= 0:  # find better later
     NODE = "UBELIX"
     DATADIR = "/storage/scratch/users/hb22g102"
     os.environ["CDO"] = "/storage/homefs/hb22g102/mambaforge/envs/env11/bin/cdo"
-    N_WORKERS = 8
+    N_WORKERS = 16
     MEMORY_LIMIT = "4GiB"
 else:
     NODE = "LOCAL"
@@ -551,7 +551,7 @@ def find_jets_v2(
     height=20,
     distance=40,
     width=6,
-    eps=0.15,
+    eps=0.00028,
     cutoff=1700,
 ) -> list:
     points = []
@@ -563,7 +563,7 @@ def find_jets_v2(
     if len(points) == 0:
         return []
     points = np.atleast_2d(points)
-    dist_matrix = pairwise_distances(np.radians(points[:, [1, 0]]), metric="haversine")
+    dist_matrix = pairwise_distances(np.radians(points[:, [1, 0]]), metric="haversine") / points[:, 2][:, None] / points[:, 2][None, :]
     labels = (
         AgglomerativeClustering(
             n_clusters=None,

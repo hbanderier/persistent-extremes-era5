@@ -5,7 +5,7 @@ from scipy.stats import gaussian_kde
 from scipy.interpolate import LinearNDInterpolator
 from xarray import DataArray
 from itertools import product
-from typing import Any, Optional, Sequence, Tuple, Union, Iterable
+from typing import Any, Mapping, Optional, Sequence, Tuple, Union, Iterable
 from nptyping import Float, Int, NDArray, Object, Shape
 
 import matplotlib as mpl
@@ -76,11 +76,11 @@ BORDERS = feat.NaturalEarthFeature(
     facecolor="none",
 )
 
-COLOR_JETS = sns.cubehelix_palette(start=1.05, rot=1.5, light=.55, dark=.2, hue=2)
+COLOR_JETS = sns.cubehelix_palette(start=1.2, rot=1.5, light=.55, dark=.2, hue=2, n_colors=10)
 
 
-def num2tex(x: float) -> str:
-    float_str = f'{x:.2g}'
+def num2tex(x: float, force: bool = False) -> str:
+    float_str = f'{x:.2e}' if force else f'{x:.2g}'
     if 'e' in float_str:
         base, exponent = float_str.split("e")
         return r"{0} \times 10^{{{1}}}".format(base, int(exponent))
@@ -448,8 +448,9 @@ class Clusterplot:
         clabels: Union[bool, list] = None,
         draw_gridlines: bool = False,
         draw_cbar: bool = True,
-        cbar_ylabel: str = None,
+        cbar_label: str = None,
         titles: Iterable = None,
+        cbar_kwargs: Mapping = None,
         **kwargs,
     ) -> ScalarMappable:
         assert len(to_plot) <= len(self.axes)
@@ -472,6 +473,12 @@ class Clusterplot:
                 cmap = make_transparent(cmap, nlev=len(levelscf), alpha_others=transparify, sym=sym)
             else:
                 cmap = make_transparent(cmap, nlev=len(levelscf), sym=sym)
+                
+        if cbar_kwargs is None:
+            cbar_kwargs = {}
+                
+        if cbar_label is not None: # backwards compat
+            cbar_kwargs['label'] = cbar_label
 
         norm = BoundaryNorm(levelscf, cmap.N, extend=extend)
         im = ScalarMappable(norm=norm, cmap=cmap)
@@ -503,14 +510,11 @@ class Clusterplot:
 
         if draw_cbar:
             self.cbar = self.fig.colorbar(
-                im, ax=self.axes.ravel().tolist(), spacing="proportional"
+                im, ax=self.fig.axes, spacing="proportional", **cbar_kwargs
             )
             self.cbar.ax.set_yticks(levelsc)
         else:
             self.cbar = None
-
-        if cbar_ylabel is not None and draw_cbar:
-            self.cbar.ax.set_ylabel(cbar_ylabel)
 
         return im
 
@@ -562,10 +566,11 @@ class Clusterplot:
         clabels: Union[bool, list] = None,
         draw_gridlines: bool = False,
         draw_cbar: bool = True,
-        cbar_ylabel: str = None,
+        cbar_label: str = None,
         titles: Iterable = None,
         colors: list | str = None,
         linestyles: list | str = None,
+        cbar_kwargs: Mapping = None,
         **kwargs,
     ) -> ScalarMappable | None:
         to_plot = [da.isel(time=mas).mean(dim="time") for mas in mask.T]
@@ -579,8 +584,9 @@ class Clusterplot:
                 clabels=None,
                 draw_gridlines=draw_gridlines,
                 draw_cbar=draw_cbar,
-                cbar_ylabel=cbar_ylabel,
+                cbar_label=cbar_label,
                 titles=titles,
+                cbar_kwargs=cbar_kwargs,
                 **kwargs,
             )
         elif type == "contour":
@@ -606,7 +612,7 @@ class Clusterplot:
                 clabels=clabels,
                 draw_gridlines=draw_gridlines,
                 draw_cbar=draw_cbar,
-                cbar_ylabel=cbar_ylabel,
+                cbar_label=cbar_label,
                 titles=titles,
                 **kwargs,
             )
