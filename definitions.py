@@ -23,6 +23,7 @@ from multiprocessing import Pool
 from functools import partial
 from itertools import permutations
 from scipy.signal import find_peaks
+from scipy.stats import norm
 
 pf = platform.platform()
 if pf.find("cray") >= 0:
@@ -368,55 +369,44 @@ def searchsortednd(
     return (p - na * (np.arange(m)[None, :])).reshape((nx, *orig_shapex))
 
 
-# def field_significance(to_test: xr.DataArray, take_from: NDArray | xr.DataArray, n_sam: int, n_sel: int = 200, thresh_up=True, q=0.98) -> Tuple[xr.DataArray, xr.DataArray]:
-#     indices = np.random.rand(n_sel, take_from.shape[0]).argpartition(n_sam, axis=1)[:, :n_sam]
-#     to_test = np.abs(to_test)
-#     if isinstance(take_from, xr.DataArray):
-#         take_from = take_from.values
-#     empirical_distribution = []
-#     cs = 500
-#     for ns in range(0, n_sam, cs):
-#         end = min(ns + cs, n_sam)
-#         empirical_distribution.append(np.mean(np.take(take_from, indices[:, ns:end], axis=0), axis=1))
-#     sym = infer_sym(empirical_distribution)
-#     empirical_distribution = np.abs(np.mean(empirical_distribution, axis=0))
-#     q = 1 - (1 - q) / 2 if sym else q
-#     nocorr = to_test > np.quantile(empirical_distribution, q=q, axis=0)
-
-#     # FDR correction
-#     idxs = np.argsort(empirical_distribution, axis=0)
-#     xcdf = np.take_along_axis(empirical_distribution, idxs, axis=0)
-#     ycdf = np.cumsum(idxs, axis=0) / np.sum(idxs, axis=0)
-#     ss = searchsortednd(xcdf.transpose((1, 2, 0)), to_test.values[:, :, None])
-#     ss[ss == n_sel] = n_sel - 1
-#     p = np.take_along_axis(ycdf.transpose((1, 2, 0)), ss, axis=-1).flatten()
-#     argp = np.argsort(p)
-#     p = p[argp]
-#     numvalid = len(p)
-#     bh_line = (1 - q) * 2 * np.arange(1, numvalid + 1) / numvalid
-#     fdrcorr = np.zeros(len(p), dtype=bool)
-#     if thresh_up:
-#         above = ((1 - p)[::-1] < bh_line)[::-1]
-#         c = np.argmax(above)
-#         fdrcorr[argp[:c]] = True
-#     else:
-#         under = p < bh_line
-#         c = len(under) - np.argmax(under[::-1]) - 1
-#         fdrcorr[argp[-c:]] = True
-#     fdrcorr = to_test.copy(data=fdrcorr.reshape(to_test.shape))
-#     return nocorr, fdrcorr
-
-
 def fdr_correction(p: NDArray, q: float = 0.02):
     pshape = p.shape
     p = p.ravel()
+    num_p = len(p)
+    fdrcorr = np.zeros(num_p, dtype=bool)
     argp = np.argsort(p)
     p = p[argp]
-    bh_line = q * np.arange(1, p.size + 1) / (p.size + 1)
-    c = p.size - np.argmax(bh_line[::-1] > p[::-1])
-    fdrcorr = np.zeros(len(p), dtype=int)
-    fdrcorr[argp[:c]] = 1
+    line_below = q * np.arange(num_p) / (num_p - 1)
+    line_above = line_below + (1 - q)
+    fdrcorr[argp] = ((p >= line_above) | (p <= line_below))
     return fdrcorr.reshape(pshape)
+
+
+def field_significance(
+    to_test: xr.DataArray,
+    take_from: NDArray | xr.DataArray,
+    n_sel: int = 100,
+    q: float = 0.02,
+) -> Tuple[xr.DataArray, xr.DataArray]:
+    n_sam = to_test.shape[0]
+    indices = np.random.rand(n_sel, take_from.shape[0]).argpartition(n_sam, axis=1)[:, :n_sam]
+    if isinstance(take_from, xr.DataArray):
+        take_from = take_from.values
+    empirical_distribution = []
+    cs = 500
+    for ns in range(0, n_sam, cs):
+        end = min(ns + cs, n_sam)
+        empirical_distribution.append(np.mean(np.take(take_from, indices[:, ns:end], axis=0), axis=1))
+    sym = infer_sym(empirical_distribution)
+    empirical_distribution = np.mean(empirical_distribution, axis=0)
+    q = q / 2 if sym else q
+    p = norm.cdf(
+        to_test.mean(dim='time').values, 
+        loc=np.mean(empirical_distribution, axis=0), 
+        scale=np.std(empirical_distribution, axis=0)
+    )
+    nocorr = (p > (1 - q)) | (p < q)
+    return nocorr, fdr_correction(p, q)
 
 
 def one_ks_cumsum(b: NDArray, a: NDArray, q: float = 0.02, n_sam: int = None):
@@ -445,7 +435,7 @@ def one_ks_searchsorted(b: NDArray, a: NDArray, q: float = 0.02, n_sam: int = No
     return nocorr, fdr_correction(p, q)
 
 
-def field_significance(
+def field_significance_v2(
     to_test: xr.DataArray,
     take_from: NDArray,
     n_sel: int = 100,

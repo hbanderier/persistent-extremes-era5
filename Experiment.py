@@ -929,10 +929,10 @@ class ClusteringExperiment(Experiment):
         n_pcas: int = None,
         OPP: int = 0,
         GPU: bool = False,
-        return_centers: bool = False,
+        return_type: int = RAW,
         train_kwargs: dict = None,
         **kwargs,
-    ) -> SOMNet | Tuple[SOMNet, xr.DataArray]:
+    ) -> Tuple[SOMNet, xr.DataArray, NDArray]:
         if n_pcas is None and OPP:
             logging.warning("OPP flag will be ignored because n_pcas is set to None")
         opp_suffix = ""
@@ -948,9 +948,6 @@ class ClusteringExperiment(Experiment):
 
         if train_kwargs is None:
             train_kwargs = {}
-
-        if output_path.is_file() and not return_centers:
-            return output_path
 
         if OPP:
             X, da = self.prepare_for_clustering()
@@ -985,12 +982,23 @@ class ClusteringExperiment(Experiment):
             )
             net.train(**train_kwargs)
             net.save_map(output_path.as_posix())
-
-        if not return_centers:
-            return net
-
-        centers = labels_to_centers(net.bmus, da, "nodes")
-        return net, centers
+        
+        if return_type in [ # Has to be here if center_output is to be able to accept both OPP clustering and regular clustering. Absolutely dirty, might change later
+            RAW_ADJUST_LABELS,
+            ADJUST_RAW,
+            REALSPACE_INV_TRANS_ADJUST_LABELS,
+            ADJUST_REALSPACE,
+            ADJUST_DIRECT_REALSPACE,
+        ]:
+            projection = project_onto_clusters(X, net.weights)
+            labels = cluster_from_projs(projection, neg=False)
+        else:
+            labels = net.bmus
+        
+        centers, labels = self.center_output(
+            net.weights, labels, None, return_type, da, X
+        )
+        return net, centers, labels
 
     def other(
         self,

@@ -78,6 +78,8 @@ BORDERS = feat.NaturalEarthFeature(
 
 COLOR_JETS = sns.cubehelix_palette(start=1.2, rot=1.5, light=.55, dark=.2, hue=2, n_colors=10)
 
+mpl.rcParams["font.size"] = 18
+mpl.rcParams['animation.ffmpeg_path'] = r'~/mambaforge/envs/env11/bin/ffmpeg'
 
 def num2tex(x: float, force: bool = False) -> str:
     float_str = f'{x:.2e}' if force else f'{x:.2g}'
@@ -436,9 +438,8 @@ class Clusterplot:
 
         if draw_gridlines:
             self._add_gridlines()
-
-    def add_contourf(
-        self,
+            
+    def setup_contourf(self,
         to_plot: list,
         nlevels: int = None,
         sym: bool = None,
@@ -446,22 +447,14 @@ class Clusterplot:
         transparify: bool | float | int = False,
         contours: bool = False,
         clabels: Union[bool, list] = None,
-        draw_gridlines: bool = False,
-        draw_cbar: bool = True,
         cbar_label: str = None,
-        titles: Iterable = None,
         cbar_kwargs: Mapping = None,
         **kwargs,
-    ) -> ScalarMappable:
-        assert len(to_plot) <= len(self.axes)
-
-        lon = to_plot[0]["lon"].values
-        lat = to_plot[0]["lat"].values
-
+    ) -> Tuple[Mapping, Mapping, ScalarMappable, NDArray]:
         levelsc, levelscf, extend, sym = create_levels(to_plot, nlevels, sym)
 
         if cmap is None and sym:
-            cmap = "bwr"
+            cmap = "seismic"
         elif cmap is None:
             cmap = MYPURPLES  # Just think it's neat
         if isinstance(cmap, str):
@@ -486,17 +479,44 @@ class Clusterplot:
         if contours or clabels is not None:
             self.add_contour(to_plot, nlevels, sym, clabels)
 
+        return dict(
+            transform=ccrs.PlateCarree(),
+            levels=levelscf,
+            cmap=cmap,
+            norm=norm,
+            extend=extend,
+            **kwargs,
+        ), cbar_kwargs, im, levelsc
+
+    def add_contourf(
+        self,
+        to_plot: list,
+        nlevels: int = None,
+        sym: bool = None,
+        cmap: str | Colormap = None,
+        transparify: bool | float | int = False,
+        contours: bool = False,
+        clabels: Union[bool, list] = None,
+        draw_gridlines: bool = False,
+        draw_cbar: bool = True,
+        cbar_label: str = None,
+        titles: Iterable = None,
+        cbar_kwargs: Mapping = None,
+        **kwargs,
+    ) -> ScalarMappable:
+        assert len(to_plot) <= len(self.axes)
+
+        lon = to_plot[0]["lon"].values
+        lat = to_plot[0]["lat"].values
+        
+        kwargs, cbar_kwargs, im, levelsc = self.setup_contourf(to_plot, nlevels, sym, cmap, transparify, contours, clabels, cbar_label, cbar_kwargs, **kwargs)
+        
         for ax, toplt in zip(self.axes, to_plot):
             ax.contourf(
                 lon,
                 lat,
                 toplt.values,
-                transform=ccrs.PlateCarree(),
-                levels=levelscf,
-                cmap=cmap,
-                norm=norm,
-                extend=extend,
-                **kwargs,
+                **kwargs
             )
 
             if self.lambert_projection and self.boundary is not None:
@@ -516,7 +536,7 @@ class Clusterplot:
         else:
             self.cbar = None
 
-        return im
+        return im, kwargs
 
     def add_stippling(
         self,
@@ -537,14 +557,14 @@ class Clusterplot:
         # da = np.sort(da, axis=0)
         for i in tqdm.trange(mask.shape[1]):
             significances.append(
-                field_significance(to_test[i], da, 20, q=0.02)[int(FDR)]
+                field_significance(to_test[i], da, 200, q=0.02)[int(FDR)]
             )
 
         for ax, signif in zip(self.axes, significances):
             cs = ax.contourf(
                 lon,
                 lat,
-                signif.values,
+                signif,
                 levels=3,
                 hatches=["", hatch],
                 colors="none",
