@@ -245,10 +245,8 @@ class Experiment(object):
             DATADIR, self.dataset, self.variable, self.level, self.region
         )
         unpacked = unpack_smooth_map(self.clim_smoothing)
-        underscore = '_' if unpacked != '' else ''
-        self.clim_path = self.base_path.joinpath(
-            self.clim_type + underscore + unpacked
-        )
+        underscore = "_" if unpacked != "" else ""
+        self.clim_path = self.base_path.joinpath(self.clim_type + underscore + unpacked)
         self.path = self.clim_path.joinpath(
             unpack_smooth_map(self.smoothing)
         )  # may be same as clim_path if no smoothing or detrending
@@ -432,7 +430,7 @@ def cluster_from_projs(
         else:
             cutoff = min(X1.shape[1], X2.shape[1])
     X1 = X1[:, :cutoff]
-    
+
     if X2 is not None:
         X2 = X2[:, :cutoff]
         X = np.empty((X1.shape[0], X1.shape[1] + X2.shape[1]))
@@ -786,7 +784,6 @@ class ClusteringExperiment(Experiment):
         da: xr.DataArray = None,
         X: NDArray = None,
     ) -> Tuple[xr.DataArray, xr.DataArray]:
-        
         unique_labels, counts = np.unique(labels, return_counts=True)
         counts = counts / len(labels)
         labels = xr.DataArray(labels, coords={"time": da.time.values})
@@ -874,19 +871,22 @@ class ClusteringExperiment(Experiment):
         except AttributeError:
             medoids = None
 
-        if return_type in [ # Has to be here if center_output is to be able to accept both OPP clustering and regular clustering. Absolutely dirty, might change later
-            RAW_ADJUST_LABELS,
-            ADJUST_RAW,
-            REALSPACE_INV_TRANS_ADJUST_LABELS,
-            ADJUST_REALSPACE,
-            ADJUST_DIRECT_REALSPACE,
-        ]:
+        if (
+            return_type
+            in [  # Has to be here if center_output is to be able to accept both OPP clustering and regular clustering. Absolutely dirty, might change later
+                RAW_ADJUST_LABELS,
+                ADJUST_RAW,
+                REALSPACE_INV_TRANS_ADJUST_LABELS,
+                ADJUST_REALSPACE,
+                ADJUST_DIRECT_REALSPACE,
+            ]
+        ):
             projection = project_onto_clusters(X, centers)
             labels = cluster_from_projs(projection, neg=False)
-            
+
         else:
             labels = results.labels_
-            
+
         centers, labels = self.center_output(
             centers, labels, medoids, return_type, da, X
         )
@@ -982,19 +982,22 @@ class ClusteringExperiment(Experiment):
             )
             net.train(**train_kwargs)
             net.save_map(output_path.as_posix())
-        
-        if return_type in [ # Has to be here if center_output is to be able to accept both OPP clustering and regular clustering. Absolutely dirty, might change later
-            RAW_ADJUST_LABELS,
-            ADJUST_RAW,
-            REALSPACE_INV_TRANS_ADJUST_LABELS,
-            ADJUST_REALSPACE,
-            ADJUST_DIRECT_REALSPACE,
-        ]:
+
+        if (
+            return_type
+            in [  # Has to be here if center_output is to be able to accept both OPP clustering and regular clustering. Absolutely dirty, might change later
+                RAW_ADJUST_LABELS,
+                ADJUST_RAW,
+                REALSPACE_INV_TRANS_ADJUST_LABELS,
+                ADJUST_REALSPACE,
+                ADJUST_DIRECT_REALSPACE,
+            ]
+        ):
             projection = project_onto_clusters(X, net.weights)
             labels = cluster_from_projs(projection, neg=False)
         else:
             labels = net.bmus
-        
+
         centers, labels = self.center_output(
             net.weights, labels, None, return_type, da, X
         )
