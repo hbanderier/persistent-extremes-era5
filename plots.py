@@ -1,6 +1,6 @@
 from contourpy import contour_generator
 import numpy as np
-import tqdm
+from tqdm import tqdm, trange
 from scipy.stats import gaussian_kde
 from scipy.interpolate import LinearNDInterpolator
 from xarray import DataArray
@@ -287,6 +287,21 @@ def doubleit(thing: list | str | None, length: int, default: str) -> list:
             return lover2 * [thing[0]] + (length % 2) * [default] + (lover2) * [thing[1]]
     else:
         return [default] * length
+    
+    
+def setup_lon_lat(
+    to_plot: list,
+    lon: NDArray | None,
+    lat: NDArray | None,
+):
+    if lon is None or lat is None:
+        try:
+            lon = to_plot[0].lon.values
+            lat = to_plot[0].lat.values
+        except AttributeError:
+            print('Either provide lon / lat or make to_plot items dataArrays')
+            raise 
+    return lon, lat
 
 
 class Clusterplot:
@@ -384,6 +399,8 @@ class Clusterplot:
     def add_contour(
         self,
         to_plot: list,
+        lon: NDArray = None,
+        lat: NDArray = None,
         nlevels: int = None,
         sym: bool = None,
         clabels: Union[bool, list] = False,
@@ -395,9 +412,8 @@ class Clusterplot:
     ) -> None:
         assert len(to_plot) <= len(self.axes)
 
-        lon = to_plot[0]["lon"].values
-        lat = to_plot[0]["lat"].values
-
+        lon, lat = setup_lon_lat(to_plot, lon, lat) # d r y too much
+        
         levelsc, _, _, sym = create_levels(to_plot, nlevels, sym)
 
         if sym and linestyles is None:
@@ -491,6 +507,8 @@ class Clusterplot:
     def add_contourf(
         self,
         to_plot: list,
+        lon: NDArray = None,
+        lat: NDArray = None,
         nlevels: int = None,
         sym: bool = None,
         cmap: str | Colormap = None,
@@ -505,17 +523,20 @@ class Clusterplot:
         **kwargs,
     ) -> ScalarMappable:
         assert len(to_plot) <= len(self.axes)
-
-        lon = to_plot[0]["lon"].values
-        lat = to_plot[0]["lat"].values
+        
+        lon, lat = setup_lon_lat(to_plot, lon, lat)
         
         kwargs, cbar_kwargs, im, levelsc = self.setup_contourf(to_plot, nlevels, sym, cmap, transparify, contours, clabels, cbar_label, cbar_kwargs, **kwargs)
         
         for ax, toplt in zip(self.axes, to_plot):
+            try:
+                toplt = toplt.values
+            except AttributeError:
+                pass
             ax.contourf(
                 lon,
                 lat,
-                toplt.values,
+                toplt,
                 **kwargs
             )
 
@@ -555,7 +576,7 @@ class Clusterplot:
         significances = []
         da = da.values
         # da = np.sort(da, axis=0)
-        for i in tqdm.trange(mask.shape[1]):
+        for i in trange(mask.shape[1]):
             significances.append(
                 field_significance(to_test[i], da, 200, q=0.02)[int(FDR)]
             )
@@ -597,7 +618,7 @@ class Clusterplot:
         if type == "contourf":
             im = self.add_contourf(
                 to_plot,
-                nlevels,
+                nlevels=nlevels,
                 sym=sym,
                 transparify=transparify,
                 contours=False,
@@ -612,7 +633,7 @@ class Clusterplot:
         elif type == "contour":
             self.add_contour(
                 to_plot,
-                nlevels,
+                nlevels=nlevels,
                 sym=sym,
                 clabels=clabels,
                 draw_gridlines=draw_gridlines,
@@ -625,7 +646,7 @@ class Clusterplot:
         elif type == "both":
             im = self.add_contourf(
                 to_plot,
-                nlevels,
+                nlevels=nlevels,
                 sym=sym,
                 transparify=transparify,
                 contours=True,

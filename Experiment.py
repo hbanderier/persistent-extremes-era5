@@ -44,6 +44,10 @@ from definitions import (
     CIequal,
     Cdo,
     labels_to_mask,
+    find_all_jets,
+    all_jets_to_one_array,
+    compute_all_jet_props,
+    track_jets,
 )
 
 RAW = 0
@@ -339,6 +343,68 @@ class Experiment(object):
 
     def get_region(self) -> tuple:
         return (self.minlon, self.maxlon, self.minlat, self.maxlat)
+
+    def find_jets(self, season: str = None, force: bool = False) -> Tuple:
+        if self.variable != "Wind":
+            print("Only valid for wind experiment")
+            raise RuntimeError
+
+        ofile_aj = self.path.joinpath("all_jets.pkl")
+        ofile_waj = self.path.joinpath("where_are_jets.npy")
+        ofile_ajoa = self.path.joinpath("all_jets_one_array.npy")
+
+        if (
+            all([ofile.is_file() for ofile in (ofile_aj, ofile_waj, ofile_ajoa)])
+            and not force
+        ):
+            all_jets = load_pickle(ofile_aj)
+            where_are_jets = np.load(ofile_waj)
+            all_jets_one_array = np.load(ofile_ajoa)
+            return all_jets, where_are_jets, all_jets_one_array
+
+        all_jets = find_all_jets(
+            self.open_da("anom", season=season), height=0.12, cutoff=100, chunksize=100
+        )
+        where_are_jets, all_jets_one_array = all_jets_to_one_array(all_jets)
+        save_pickle(all_jets, ofile_aj)
+        np.save(ofile_waj, where_are_jets)
+        np.save(ofile_ajoa, all_jets_one_array)
+        return all_jets, where_are_jets, all_jets_one_array
+
+    def compute_jet_props(self, season: str = None, force: bool = False) -> Tuple:
+        if self.variable != "Wind":
+            print("Only valid for wind experiment")
+            raise RuntimeError
+        all_jets, _, _ = self.find_jets(season=season, force=force)
+        all_props, is_double, is_single, polys = compute_all_jet_props(all_jets)
+        return all_props, is_double, is_single, polys
+
+    def track_jets(self, season: str = None, force: bool = False) -> Tuple:
+        if self.variable != "Wind":
+            print("Only valid for wind experiment")
+            raise RuntimeError
+
+        all_jets, where_are_jets, all_jets_one_array = self.find_jets(season=season, force=force)
+        ofile_ajot = self.path.joinpath("all_jets_over_time.pkl")
+        ofile_flags = self.path.joinpath("flags.npy")
+
+        if all([ofile.is_file() for ofile in (ofile_ajot, ofile_flags)]) and not force:
+            all_jets_over_time = load_pickle(ofile_ajot)
+            flags = np.load(ofile_flags)
+
+            return (
+                all_jets,
+                where_are_jets,
+                all_jets_one_array,
+                all_jets_over_time,
+                flags,
+            )
+
+        all_jets_over_time, flags = track_jets(all_jets_one_array, where_are_jets)
+
+        save_pickle(all_jets_over_time, ofile_ajot)
+        np.save(ofile_flags, flags)
+        return all_jets, where_are_jets, all_jets_one_array, all_jets_over_time, flags
 
     def other(
         self,

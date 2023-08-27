@@ -6,6 +6,7 @@ from time import perf_counter
 import numpy as np
 from sklearn.cluster import DBSCAN, AgglomerativeClustering
 from sklearn.metrics import pairwise_distances
+from sklearn.metrics.pairwise import haversine_distances
 
 try:
     import cupy as cp  # won't work on cpu nodes
@@ -17,13 +18,16 @@ from typing import Any, Optional, Tuple, Union, Iterable
 
 import pandas as pd
 import xarray as xr
+from tqdm import trange, tqdm
 from cdo import Cdo
+from skimage.filters import frangi
 from nptyping import Float, Int, NDArray, Object, Shape
 from multiprocessing import Pool
 from functools import partial
 from itertools import permutations
 from scipy.signal import find_peaks
 from scipy.stats import norm
+from numba import njit
 
 pf = platform.platform()
 if pf.find("cray") >= 0:
@@ -40,14 +44,14 @@ elif pf.find("el7") >= 0:  # find better later
     NODE = "UBELIX"
     DATADIR = "/storage/scratch/users/hb22g102"
     os.environ["CDO"] = "/storage/homefs/hb22g102/mambaforge/envs/env11/bin/cdo"
-    N_WORKERS = 16
+    N_WORKERS = 8
     MEMORY_LIMIT = "4GiB"
 else:
     NODE = "LOCAL"
     N_WORKERS = 8
     DATADIR = "../data"
     MEMORY_LIMIT = "2GiB"
-    
+
 
 CLIMSTOR = "/mnt/climstor/ecmwf/era5/raw"
 
@@ -248,12 +252,12 @@ def get_hostpells_v2(
 
 def apply_hotspells_mask_v2(
     hotspells: list,
-    da: xr.DataArray,
+    ds: xr.Dataset,
     maxlen: int = None,
     maxnhs: int = None,
     regions: list = None,
     lag_behind: int = 10,
-) -> xr.DataArray:
+) -> xr.Dataset:
     if regions is None:
         regions = REGIONS
     assert len(regions) == len(hotspells)
@@ -264,26 +268,48 @@ def apply_hotspells_mask_v2(
             maxnhs = max(maxnhs, len(region))
             for hotspell in region:
                 maxlen = max(maxlen, len(hotspell))
-    data = np.zeros((da.shape[1], len(hotspells), maxnhs, maxlen))
-    data[:] = np.nan
-    da_masked = xr.DataArray(
+    data = {}
+    other_coord = list(ds.coords.items())[1]
+    for varname in ds.data_vars:
+        data[varname] = (
+            (other_coord[0], 'region', 'hotspell', 'day_after_beg'), 
+            np.zeros((ds[varname].shape[1], len(hotspells), maxnhs, maxlen))
+        )
+        data[varname][1][:] = np.nan
+    ds_masked = xr.Dataset(
         data,
         coords={
-            list(da.coords)[1]: np.arange(da.shape[1]),
+            other_coord[0]: other_coord[1].values,
             "region": regions,
             "hotspell": np.arange(maxnhs),
             "day_after_beg": np.arange(maxlen) - lag_behind,
         },
     )
-    for i, regionhs in enumerate(hotspells):
-        for j, hotspell in enumerate(regionhs):
+    for varname in ds.data_vars:
+        for i, regionhs in enumerate(hotspells):
+            for j, hotspell in enumerate(regionhs):
+                try:
+                    ds_masked[varname][:, i, j, :len(hotspell)] = ds[varname].sel(
+                        time=hotspells[i][j].values
+                    ).values.T
+                except KeyError:
+                    ...
+    return ds_masked
+
+
+def get_hotspell_mask(da_time: xr.DataArray | NDArray, num_lags: int = 1) -> xr.DataArray:
+    hotspells = get_hostpells_v2(lag_behind=num_lags)[0]
+    if isinstance(da_time, xr.DataArray):
+        da_time = da_time.values
+    hs_mask = np.zeros((len(da_time), len(REGIONS), num_lags))
+    hs_mask = xr.DataArray(hs_mask, coords={'time': da_time, 'region': REGIONS, 'lag': np.arange(num_lags)})
+    for i, region in enumerate(REGIONS):
+        for hotspell in hotspells[i]:
             try:
-                da_masked[:, i, j, : len(hotspell)] = da.sel(
-                    time=hotspells[i][j].values
-                ).values.T
+                hs_mask.loc[hotspell[:10], region, np.arange(num_lags)] += np.eye(num_lags) * len(hotspell)
             except KeyError:
                 ...
-    return da_masked
+    return hs_mask
 
 
 def autocorrelation(path: Path, time_steps: int = 50) -> Path:
@@ -378,7 +404,7 @@ def fdr_correction(p: NDArray, q: float = 0.02):
     p = p[argp]
     line_below = q * np.arange(num_p) / (num_p - 1)
     line_above = line_below + (1 - q)
-    fdrcorr[argp] = ((p >= line_above) | (p <= line_below))
+    fdrcorr[argp] = (p >= line_above) | (p <= line_below)
     return fdrcorr.reshape(pshape)
 
 
@@ -389,21 +415,25 @@ def field_significance(
     q: float = 0.02,
 ) -> Tuple[xr.DataArray, xr.DataArray]:
     n_sam = to_test.shape[0]
-    indices = np.random.rand(n_sel, take_from.shape[0]).argpartition(n_sam, axis=1)[:, :n_sam]
+    indices = np.random.rand(n_sel, take_from.shape[0]).argpartition(n_sam, axis=1)[
+        :, :n_sam
+    ]
     if isinstance(take_from, xr.DataArray):
         take_from = take_from.values
     empirical_distribution = []
     cs = 500
     for ns in range(0, n_sam, cs):
         end = min(ns + cs, n_sam)
-        empirical_distribution.append(np.mean(np.take(take_from, indices[:, ns:end], axis=0), axis=1))
+        empirical_distribution.append(
+            np.mean(np.take(take_from, indices[:, ns:end], axis=0), axis=1)
+        )
     sym = infer_sym(empirical_distribution)
     empirical_distribution = np.mean(empirical_distribution, axis=0)
     q = q / 2 if sym else q
     p = norm.cdf(
-        to_test.mean(dim='time').values, 
-        loc=np.mean(empirical_distribution, axis=0), 
-        scale=np.std(empirical_distribution, axis=0)
+        to_test.mean(dim="time").values,
+        loc=np.mean(empirical_distribution, axis=0),
+        scale=np.std(empirical_distribution, axis=0),
     )
     nocorr = (p > (1 - q)) | (p < q)
     return nocorr, fdr_correction(p, q)
@@ -460,9 +490,11 @@ def field_significance_v2(
         func = partial(one_ks_searchsorted, a=a, q=q, n_sam=n_sam)
     else:
         func = partial(one_ks_cumsum, a=a, q=q, n_sam=n_sam)
-        
+
     with Pool(processes=processes) as pool:
-        results = pool.map(func, (take_from[indices_] for indices_ in indices), chunksize=chunksize)
+        results = pool.map(
+            func, (take_from[indices_] for indices_ in indices), chunksize=chunksize
+        )
     nocorr, fdrcorr = zip(*results)
     nocorr = to_test[0].copy(data=np.sum(nocorr, axis=0) > (1 - q) * n_sel)
     fdrcorr = to_test[0].copy(data=np.sum(fdrcorr, axis=0) > (1 - q) * n_sel)
@@ -476,100 +508,91 @@ def labels_to_mask(labels: xr.DataArray | NDArray) -> NDArray:
     return labels[:, None] == unique_labels[None, :]
 
 
-def find_jets(
-    X,
-    lon: NDArray,
-    lat: NDArray,
-    height=20,
-    distance=20,
-    width=6,
-    grad=4,
-    juncdistlo=5,
-    juncdistla=6,
-    cutoff=60,
-) -> list:
-    jets = []
-    for i, x in enumerate(X.T):
-        lo = lon[i]
-        peaks = find_peaks(x, height=height, distance=distance, width=width)[0]
-        for la, sp in zip(lat[peaks], x[peaks]):
-            found = False
-            for jet in jets:
-                if (np.abs(jet[-1][0] - lo) + np.abs(jet[-1][1] - la)) <= grad:
-                    jet.append((lo, la, sp))
-                    found = True
-                    break
-            if not found:
-                jets.append([(lo, la, sp)])
-
-    jets = [np.asarray(jet) for jet in jets]
-    jets = [jet[np.argsort(jet[:, 0])] for jet in jets]
-    done = False
-    while not done:
-        done = True
-        njets = len(jets)
-        for i1, i2 in permutations(range(njets), 2):
-            jet1, jet2 = jets[i1], jets[i2]
-            dlo1 = np.abs(jet1[-1][0] - jet2[0][0])
-            dla1 = np.abs(jet1[-1][1] - jet2[0][1])
-            dlo2 = np.abs(jet1[-1][0] - jet2[-1][0])
-            dla2 = np.abs(jet1[-1][1] - jet2[-1][1])
-            if dlo1 <= juncdistlo and dla1 <= juncdistla:
-                jets[i1] = np.concatenate([jet1, jet2], axis=0)
-                jets[i1] = jets[i1][np.argsort(jets[i1][:, 0])]
-                del jets[i2]
-                done = False
-                break
-            if dlo2 <= juncdistlo and dla2 <= juncdistla:
-                jets[i1] = np.concatenate([jet1, jet2[::-1]], axis=0)
-                jets[i1] = jets[i1][np.argsort(jets[i1][:, 0])]
-                del jets[i2]
-                done = False
-                break
-
-    for i in range(len(jets) - 1, -1, -1):
-        if len(jets[i]) < cutoff:
-            del jets[i]
-
-    return jets
+def compute_distance_matrix_(points, weights=None):
+    if weights is None:
+        weights = [1, 1]
+    points_weighed = points[:, [1, 0]] * np.asarray(weights)[None, :]
+    return haversine_distances(np.radians(points_weighed))
 
 
-def find_jets_v2(
-    X,
-    lon: NDArray,
-    lat: NDArray,
-    height=20,
-    distance=40,
-    width=6,
-    eps=0.00028,
-    cutoff=1700,
-) -> list:
-    points = []
-    for i, x in enumerate(X.T):
-        lo = lon[i]
-        peaks = find_peaks(x, height=height, distance=distance, width=width)[0]
-        for peak in peaks:
-            points.append([lo, lat[peak], x[peak]])
-    if len(points) == 0:
-        return []
-    points = np.atleast_2d(points)
-    dist_matrix = pairwise_distances(np.radians(points[:, [1, 0]]), metric="haversine") / points[:, 2][:, None] / points[:, 2][None, :]
-    labels = (
-        AgglomerativeClustering(
+def find_jets_v2_(points, eps, weights=None, kind="AgglomerativeClustering"):
+    dist_matrix = compute_distance_matrix_(points, weights=weights)
+    if kind == "DBSCAN":
+        model = DBSCAN(
+            eps=eps,
+            metric="precomputed",
+        )
+    elif kind == "AgglomerativeClustering":  # strategy pattern ?
+        model = AgglomerativeClustering(
             n_clusters=None,
             distance_threshold=eps,
             metric="precomputed",
             linkage="single",
         )
-        .fit(dist_matrix)
-        .labels_
-    )
+    labels = model.fit(dist_matrix).labels_
     masks = labels_to_mask(labels)
-    jets = []
-    for mask in masks.T:
-        if np.sum(points[mask, 2]) > cutoff:
-            jets.append(points[mask])
-    return jets
+    return [points[mask] for mask in masks.T]
+
+
+def update_jet(jet: NDArray):
+    x, y, s = jet.T
+    x_, c_ = np.unique(x, return_index=True)
+    s_split = np.split(s, c_[1:])
+    y_ = np.empty(len(s_split))
+    s_ = np.empty(len(s_split))
+    for i, sp in enumerate(s_split):
+        j = np.argmax(sp) + c_[i]
+        y_[i] = y[j]
+        s_[i] = s[j]
+    return np.stack([x_, y_, s_], axis=-1)
+
+
+def find_jets_v4(
+    X,
+    lon: NDArray,
+    lat: NDArray,
+    eps: float = 5,
+    height: float = 0.3,
+    cutoff: int = 100,
+) -> list:
+    points = []
+    res = lon[1] - lon[0]
+    cutoff = cutoff / res
+    X_norm = X / np.amax(X)
+    X_prime = frangi(X_norm, black_ridges=False, sigmas=range(12, 23, 2), cval=1)
+    for i, x in enumerate(X_prime.T):
+        lo = lon[i]
+        peaks = find_peaks(x, height=height, distance=10, width=1)[0]
+        for peak in peaks:
+            for plus in [-2, -1, 0, 1, 2]:
+                try:
+                    if x[peak + plus] > height:
+                        points.append([lo, lat[peak + plus], x[peak + plus]])
+                except IndexError:
+                    pass
+    for j, x in enumerate(X_prime):
+        la = lat[j]
+        peaks = find_peaks(x, height=height, distance=20000, width=5)[0]
+        for peak in peaks:
+            for plus in [-2, -1, 0, 1, 2]:
+                try:
+                    if x[peak + plus] > height:
+                        points.append([lon[peak + plus], la, x[peak + plus]])
+                except IndexError:
+                    pass
+    if len(points) == 0:
+        return []
+    points = np.atleast_2d(points)
+    argsort = np.argsort(points[:, 0])
+    points = points[argsort, :]
+    eps = eps * np.radians(res)
+    potential_jets = find_jets_v2_(points, eps=eps)
+
+    jets = [jet for jet in potential_jets if np.sum(jet[:, 2]) > cutoff]
+    sorted_order = np.argsort(
+        [np.average(jet[:, 1], weights=jet[:, 2]) for jet in jets]
+    )
+    return [update_jet(jets[i]) for i in sorted_order]
 
 
 def find_all_jets(
@@ -577,28 +600,16 @@ def find_all_jets(
     X: NDArray = None,
     processes: int = N_WORKERS,
     chunksize: int = 10,
-    which=2,
     **kwargs,
 ) -> Tuple[list, xr.DataArray]:
     lon = da.lon.values
     lat = da.lat.values
-    func = partial(
-        find_jets if which == 1 else find_jets_v2, lon=lon, lat=lat, **kwargs
-    )
+    func = partial(find_jets_v4, lon=lon, lat=lat, **kwargs)
     if X is None:
         X = da.values
     with Pool(processes=processes) as pool:
-        alljets = pool.map(func, X, chunksize=chunksize)
+        alljets = list(tqdm(pool.imap(func, X, chunksize=chunksize)))
     return alljets
-
-
-# def jet_integral(jet: NDArray) -> float:
-#     distances = np.diagonal(pairwise_distances(np.radians(jet[:, :2]), metric='haversine'), offset=1)
-#     rprime = np.zeros(len(jet))
-#     rprime[:-1] += distances
-#     rprime[1:] += distances
-#     rprime[1:-1] /= 2.
-#     return np.trapz(jet[:, 2] * rprime)
 
 
 def jet_integral(jet: NDArray) -> float:
@@ -607,20 +618,31 @@ def jet_integral(jet: NDArray) -> float:
 
 def compute_jet_props(jets: list, eur_thresh: float = 19) -> Tuple[list, bool, bool]:
     props = []
+    polys = []
     count = 1 if len(jets) > 0 else 0
     count_over_europe = 0
-    to_sort = []
     for jet in jets:
         x, y, s = jet.T
         dic = {}
         dic["mean_lon"] = np.average(x, weights=s)
         dic["mean_lat"] = np.average(y, weights=s)
+        dic["is_polar"] = dic["mean_lat"] > 45
+        maxind = np.argmax(s)
+        dic["Lon"] = x[maxind]
+        dic["Lat"] = y[maxind]
+        dic["Spe"] = s[maxind]
+        dic["lon_ext"] = np.amax(x) - np.amin(x)
+        dic["lat_ext"] = np.amax(y) - np.amin(y)
+        p, r, _, _, _ = np.polyfit(x, y, w=s, deg=4, full=True)
+        p = np.poly1d(p)
+        polys.append((p, r))
+        p = np.polyfit(x, y, w=s, deg=1)
+        dic["tilt"] = p[0]
         try:
             dic["int_over_europe"] = jet_integral(jet[x > -10])
         except ValueError:
             dic["int_over_europe"] = 0
         dic["int_all"] = jet_integral(jet)
-        to_sort.append(dic["mean_lat"])
         count += np.any(
             [
                 np.abs(other_dic["mean_lat"] - dic["mean_lat"]) > 15
@@ -631,20 +653,222 @@ def compute_jet_props(jets: list, eur_thresh: float = 19) -> Tuple[list, bool, b
         props.append(dic)
     is_single = count == 1
     is_double = (count > 1) and (count_over_europe > 1)
-    sorted_order = np.argsort(to_sort)
-    jets = [jets[i] for i in sorted_order]
-    props = [props[i] for i in sorted_order]
-    return jets, props, is_double, is_single
+    return props, is_double, is_single, polys
 
 
 def compute_all_jet_props(
     all_jets: list,
     processes: int = N_WORKERS,
-    chunk_size: int = 10,
+    chunk_size: int = 50,
     eur_thresh: float = 19,
 ) -> Tuple[list, NDArray, NDArray]:
     func = partial(compute_jet_props, eur_thresh=eur_thresh)
     with Pool(processes=processes) as pool:
-        results = pool.map(func, all_jets, chunksize=chunk_size)
-    all_jets, all_props, is_double, is_single = zip(*results)
-    return all_jets, all_props, np.asarray(is_double), np.asarray(is_single)
+        results = list(tqdm(pool.imap(func, all_jets, chunksize=chunk_size)))
+    all_props, is_double, is_single, polys = zip(*results)
+    return all_props, np.asarray(is_double), np.asarray(is_single), polys
+
+
+def props_to_np(all_props: list, maxnjet: int = 2) -> NDArray:
+    props_as_np = np.zeros((len(all_props), maxnjet, len(all_props[0][0])))
+    for i, props in enumerate(all_props):
+        for j, prop in enumerate(props):
+            if j > 1:
+                continue
+            props_as_np[i, j, :] = [val for val in prop.values()]
+    return props_as_np
+
+
+def props_to_ds(all_props: list, time: NDArray | xr.DataArray = None, maxnjet: int = 3) -> xr.Dataset:
+    if time is None:
+        time = DATERANGEPL_SUMMER
+    try:
+        time_name = time.name
+        time = time.values
+    except AttributeError:
+        time_name = 'time'
+    assert len(time) == len(all_props)
+    varnames = list(all_props[0][0].keys())
+    ds = {}
+    for varname in varnames:
+        ds[varname] = ((time_name, 'jet'), np.zeros((len(time), maxnjet)))
+        ds[varname][1][:] = np.nan
+        for t in range(len(all_props)):
+            for i in range(maxnjet):
+                try:
+                    props = all_props[t][i]
+                except IndexError:
+                    break
+                ds[varname][1][t, i] = props[varname]
+    ds = xr.Dataset(
+        ds, 
+        coords={time_name: time, 'jet': np.arange(maxnjet)}
+    )
+    return ds
+    
+    
+def all_jets_to_one_array(all_jets: list):
+    num_jets = [len(j) for j in all_jets]
+    maxnjets = max(num_jets)
+    num_indiv_jets = sum(num_jets)
+    where_are_jets = np.full((len(all_jets), maxnjets, 2), fill_value=-1)
+    all_jets_one_array = []
+    k = 0
+    l = 0
+    for t, jets in enumerate(all_jets):
+        for j, jet in enumerate(jets):
+            l = k + len(jet)
+            all_jets_one_array.append(jet)
+            where_are_jets[t, j, :] = (k, l)
+            k = l
+    all_jets_one_array = np.concatenate(all_jets_one_array)
+    return where_are_jets, all_jets_one_array
+
+
+def one_array_to_all_jets(all_jets_one_array, where_are_jets):
+    all_jets = []
+    for where_are_jet in where_are_jets:
+        all_jets.append([])
+        for k, l in where_are_jet:
+            all_jets[-1].append(all_jets_one_array[k:l])
+    return all_jets
+
+
+@njit
+def isin(a, b):
+    shape = a.shape
+    a = a.ravel()
+    n = len(a)
+    result = np.full(n, False, dtype=np.bool_)
+    set_b = set(b)
+    for i in range(n):
+        if a[i] in set_b:
+            result[i] = True
+    return result.reshape(shape)
+
+
+@njit
+def amin_ax0(a):
+    result = np.zeros(a.shape[1])
+    for i, a_ in enumerate(a.T):
+        result[i] = np.amin(a_)
+    return result
+
+
+@njit
+def amin_ax1(a):
+    result = np.zeros(a.shape[0])
+    for i, a_ in enumerate(a):
+        result[i] = np.amin(a_)
+    return result
+
+
+@njit
+def track_jets(all_jets_one_array, where_are_jets):
+    factor: float = 0.2
+    yearbreaks: int = 92
+    guess_nflags: int = 1500
+    all_jets_over_time = np.full(
+        (guess_nflags, yearbreaks, 2), fill_value=len(where_are_jets), dtype=np.int32
+    )
+    last_valid_idx = np.full(guess_nflags, fill_value=yearbreaks, dtype=np.int32)
+    for j in range(np.sum(where_are_jets[0, 0] >= 0)):
+        all_jets_over_time[j, 0, :] = (0, j)
+        last_valid_idx[j] = 0
+    flags = np.full(where_are_jets.shape[:2], fill_value=guess_nflags, dtype=np.int32)
+    last_flag = np.sum(where_are_jets[0, 0] >= 0) - 1
+    flags[0, :last_flag + 1] = np.arange(last_flag + 1)
+    for t, jet_idxs in enumerate(where_are_jets[1:]):  # can't really parallelize
+        potentials = np.zeros(50, dtype=np.int32)
+        from_ = max(0, last_flag - 30)
+        times_to_test = np.take_along_axis(
+            all_jets_over_time[from_ : last_flag + 1, :, 0],
+            last_valid_idx[from_ : last_flag + 1, None],
+            axis=1,
+        ).flatten()
+        potentials = (
+            from_
+            + np.where(
+                isin(times_to_test, [t, t - 1, t - 2])
+                & ((times_to_test // yearbreaks) == ((t + 1) // yearbreaks)).astype(
+                    np.bool_
+                )
+            )[0]
+        )
+        num_valid_jets = np.sum(jet_idxs[:, 0] >= 0)
+        dist_mat = np.zeros((len(potentials), num_valid_jets), dtype=np.float32)
+        for i, jtt_idx in enumerate(potentials):
+            t_jtt, j_jtt = all_jets_over_time[jtt_idx, last_valid_idx[jtt_idx]]
+            k_jtt, l_jtt = where_are_jets[t_jtt, j_jtt]
+            jet_to_try = all_jets_one_array[k_jtt:l_jtt, :2]
+            for j in range(num_valid_jets):
+                k, l = jet_idxs[j]
+                jet = all_jets_one_array[k:l, :2]
+                distances = np.sqrt(
+                    np.sum(
+                        (
+                            np.radians(jet_to_try)[None, :, :]
+                            - np.radians(jet)[:, None, :]
+                        )
+                        ** 2,
+                        axis=-1,
+                    )
+                )
+                # distances = haversine_distances(np.radians(jet_to_try), np.radians(jet))
+                dist_mat[i, j] = np.mean(
+                    np.array(
+                        [
+                            np.sum(amin_ax1(distances / len(jet_to_try))),
+                            np.sum(amin_ax0(distances / len(jet))),
+                        ]
+                    )
+                )
+        connected_mask = dist_mat < factor
+        flagged = np.zeros(num_valid_jets, dtype=np.bool_)
+        for i, jtt_idx in enumerate(potentials):
+            k_jtt, l_jtt = all_jets_over_time[jtt_idx, last_valid_idx[jtt_idx]]
+            jet_to_try = all_jets_one_array[k_jtt:l_jtt, :2]
+            js = np.argsort(dist_mat[i])
+            for j in js:
+                if not connected_mask[i, j]:
+                    break
+                if flagged[j]:
+                    continue
+                last_valid_idx[jtt_idx] = last_valid_idx[jtt_idx] + 1
+                all_jets_over_time[jtt_idx, last_valid_idx[jtt_idx], :] = (t + 1, j)
+                flagged[j] = True
+                flags[t + 1, j] = jtt_idx
+                break
+
+        for j in range(num_valid_jets):
+            if not flagged[j]:
+                last_flag += 1
+                all_jets_over_time[last_flag, 0, :] = (t + 1, j)
+                last_valid_idx[last_flag] = 0
+                flags[t + 1, j] = last_flag
+                flagged[j] = True
+
+    return all_jets_over_time, flags
+
+
+def extract_props_over_time(jet, all_props):
+    varnames = list(all_props[0][0].keys())
+    props_over_time = {varname: np.zeros(len(jet)) for varname in varnames}
+    for varname in varnames:
+        for ti, (t, j) in enumerate(jet):
+            props_over_time[varname][ti] = all_props[t][j][varname]
+    return props_over_time
+
+
+def add_persistence_to_props(ds_props: xr.Dataset, flags: NDArray):
+    names = tuple(ds_props.coords.keys())
+    num_jets = ds_props['mean_lon'].shape[1]
+    jet_persistence_prop = flags[:, :num_jets].copy().astype(float)
+    nan_flag = np.amax(flags)
+    unique_flags, jet_persistence = np.unique(flags, return_counts=True)
+    for i, flag in enumerate(unique_flags[:-1]):
+        jet_persistence_prop[flags[:, :num_jets] == flag] = jet_persistence[i]
+    jet_persistence_prop[flags[:, :num_jets] == nan_flag] = np.nan
+    ds_props['persistence'] = (names, jet_persistence_prop)
+    return ds_props
+    
