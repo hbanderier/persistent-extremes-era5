@@ -1,10 +1,10 @@
 from contourpy import contour_generator
 import numpy as np
-from tqdm import tqdm, trange
 from scipy.stats import gaussian_kde
 from scipy.interpolate import LinearNDInterpolator
-from xarray import DataArray
-from itertools import product
+from scipy.ndimage import center_of_mass
+import xarray as xr
+from xarray import DataArray, Dataset
 from typing import Any, Mapping, Optional, Sequence, Tuple, Union, Iterable
 from nptyping import Float, Int, NDArray, Object, Shape
 
@@ -26,11 +26,19 @@ from matplotlib.colors import (
 )
 from matplotlib.container import BarContainer
 from matplotlib.gridspec import GridSpec
+import colormaps as cmaps
 import seaborn as sns
 import cartopy.crs as ccrs
 import cartopy.feature as feat
 
-from definitions import field_significance, LATBINS, infer_sym
+from definitions import (
+    DATADIR,
+    REGIONS,
+    PRETTIER_VARNAME,
+    field_significance,
+    LATBINS,
+    infer_sym,
+)
 
 
 # COLORS5 = [  # https://coolors.co/palette/ef476f-ffd166-06d6a0-118ab2-073b4c
@@ -43,11 +51,11 @@ from definitions import field_significance, LATBINS, infer_sym
 # ]
 
 COLORS5 = [
-    '#167e1b',
-    '#8d49c5',
-    '#d2709c',
-    '#c48b45',
-    '#5ccc99',
+    "#167e1b",
+    "#8d49c5",
+    "#d2709c",
+    "#c48b45",
+    "#5ccc99",
 ]
 
 COLORS10 = [  # https://coolors.co/palette/f94144-f3722c-f8961e-f9844a-f9c74f-90be6d-43aa8b-4d908e-577590-277da1
@@ -63,7 +71,7 @@ COLORS10 = [  # https://coolors.co/palette/f94144-f3722c-f8961e-f9844a-f9c74f-90
     "#277DA1",  # Night Blue
 ]
 
-MYPURPLES = LinearSegmentedColormap.from_list("mypruples", ['#FFFFFF', '#8338EC'])
+MYPURPLES = LinearSegmentedColormap.from_list("mypruples", ["#FFFFFF", "#8338EC"])
 
 COASTLINE = feat.NaturalEarthFeature(
     "physical", "coastline", "110m", edgecolor="black", facecolor="none"
@@ -76,14 +84,15 @@ BORDERS = feat.NaturalEarthFeature(
     facecolor="none",
 )
 
-COLOR_JETS = sns.cubehelix_palette(start=1.2, rot=1.5, light=.55, dark=.2, hue=2, n_colors=10)
+COLOR_JETS = cmaps.wind_light(np.linspace(0.7, 0.9, 4))
 
 mpl.rcParams["font.size"] = 18
-mpl.rcParams['animation.ffmpeg_path'] = r'~/mambaforge/envs/env11/bin/ffmpeg'
+mpl.rcParams["animation.ffmpeg_path"] = r"~/mambaforge/envs/env11/bin/ffmpeg"
+
 
 def num2tex(x: float, force: bool = False) -> str:
-    float_str = f'{x:.2e}' if force else f'{x:.2g}'
-    if 'e' in float_str:
+    float_str = f"{x:.2e}" if force else f"{x:.2g}"
+    if "e" in float_str:
         base, exponent = float_str.split("e")
         return r"{0} \times 10^{{{1}}}".format(base, int(exponent))
     else:
@@ -91,7 +100,11 @@ def num2tex(x: float, force: bool = False) -> str:
 
 
 def make_transparent(
-    cmap: str | Colormap, nlev: int = None, alpha_others: float = 1, n_transparent: int = 1, sym: bool = False,
+    cmap: str | Colormap,
+    nlev: int = None,
+    alpha_others: float = 1,
+    n_transparent: int = 1,
+    sym: bool = False,
 ) -> Colormap:
     if isinstance(cmap, str):
         cmap = mpl.colormaps[cmap]
@@ -100,19 +113,19 @@ def make_transparent(
     colorlist = cmap(np.linspace(0, 1, nlev + sym))
     if sym:
         midpoint = int(np.ceil(nlev / 2))
-        colorlist[midpoint - n_transparent + 1: midpoint + n_transparent, -1] = 0
-        colorlist[midpoint + n_transparent:, -1] = alpha_others
-        colorlist[:midpoint - n_transparent + 1, -1] = alpha_others
+        colorlist[midpoint - n_transparent + 1 : midpoint + n_transparent, -1] = 0
+        colorlist[midpoint + n_transparent :, -1] = alpha_others
+        colorlist[: midpoint - n_transparent + 1, -1] = alpha_others
     else:
         colorlist[:n_transparent, -1] = 0
         colorlist[n_transparent:, -1] = alpha_others
-    
+
     return ListedColormap(colorlist)
 
 
 def num2tex(x: float) -> str:
-    float_str = f'{x:.2g}'
-    if 'e' in float_str:
+    float_str = f"{x:.2g}"
+    if "e" in float_str:
         base, exponent = float_str.split("e")
         return r"{0} \times 10^{{{1}}}".format(base, int(exponent))
     else:
@@ -207,13 +220,17 @@ def honeycomb_panel(
     return fig, axes
 
 
-def infer_extent(to_plot: list, sym: bool) -> Tuple[int, float]:  # I could market this
+def infer_extent(
+    to_plot: list, sym: bool, start: float = None
+) -> Tuple[int, float]:  # I could market this
     max = np.quantile(to_plot, q=0.97)
     lmax = np.log10(max)
     lmax = int(np.sign(lmax) * np.round(np.abs(lmax)))
 
     if sym:
         min = 0
+    elif start is not None:
+        min = start
     else:
         min = np.amin(to_plot)
 
@@ -249,12 +266,12 @@ def infer_extent(to_plot: list, sym: bool) -> Tuple[int, float]:  # I could mark
 
 
 def create_levels(
-    to_plot: list, nlevels: int = None, sym: bool = False
+    to_plot: list, nlevels: int = None, sym: bool = False, start: float = None
 ) -> Tuple[NDArray, NDArray, str]:
     if sym is None:
         sym = infer_sym(to_plot)
 
-    nlevels_cand, min_rounded, max_rounded = infer_extent(to_plot, sym)
+    nlevels_cand, min_rounded, max_rounded = infer_extent(to_plot, sym, start)
 
     if nlevels is None:
         nlevels = nlevels_cand
@@ -282,13 +299,17 @@ def doubleit(thing: list | str | None, length: int, default: str) -> list:
     elif isinstance(thing, list):
         lover2 = int(length / 2)
         if len(thing) == 3:
-            return lover2 * [thing[0]] + (length % 2) * [thing[1]] + (lover2) * [thing[2]]
+            return (
+                lover2 * [thing[0]] + (length % 2) * [thing[1]] + (lover2) * [thing[2]]
+            )
         else:
-            return lover2 * [thing[0]] + (length % 2) * [default] + (lover2) * [thing[1]]
+            return (
+                lover2 * [thing[0]] + (length % 2) * [default] + (lover2) * [thing[1]]
+            )
     else:
         return [default] * length
-    
-    
+
+
 def setup_lon_lat(
     to_plot: list,
     lon: NDArray | None,
@@ -299,8 +320,8 @@ def setup_lon_lat(
             lon = to_plot[0].lon.values
             lat = to_plot[0].lat.values
         except AttributeError:
-            print('Either provide lon / lat or make to_plot items dataArrays')
-            raise 
+            print("Either provide lon / lat or make to_plot items dataArrays")
+            raise
     return lon, lat
 
 
@@ -334,7 +355,7 @@ class Clusterplot:
                 / (self.maxlon - self.minlon)
                 * self.nrow
                 / (self.ncol + (0.5 if honeycomb else 0))
-                * 0.8 # for the colorbar padding
+                * 0.8  # for the colorbar padding
             )
         if honeycomb:
             self.fig, self.axes = honeycomb_panel(
@@ -403,6 +424,7 @@ class Clusterplot:
         lat: NDArray = None,
         nlevels: int = None,
         sym: bool = None,
+        start: float = None,
         clabels: Union[bool, list] = False,
         draw_gridlines: bool = False,
         titles: Iterable = None,
@@ -412,13 +434,13 @@ class Clusterplot:
     ) -> None:
         assert len(to_plot) <= len(self.axes)
 
-        lon, lat = setup_lon_lat(to_plot, lon, lat) # d r y too much
-        
-        levelsc, _, _, sym = create_levels(to_plot, nlevels, sym)
+        lon, lat = setup_lon_lat(to_plot, lon, lat)  # d r y too much
+
+        levelsc, _, _, sym = create_levels(to_plot, nlevels, sym, start)
 
         if sym and linestyles is None:
-            linestyles = ['dashed', 'solid']
-            
+            linestyles = ["dashed", "solid"]
+
         if sym:
             colors = doubleit(colors, len(levelsc), "black")
             linestyles = doubleit(linestyles, len(levelsc), "solid")
@@ -454,11 +476,13 @@ class Clusterplot:
 
         if draw_gridlines:
             self._add_gridlines()
-            
-    def setup_contourf(self,
+
+    def setup_contourf(
+        self,
         to_plot: list,
         nlevels: int = None,
         sym: bool = None,
+        start: float = None,
         cmap: str | Colormap = None,
         transparify: bool | float | int = False,
         contours: bool = False,
@@ -467,7 +491,7 @@ class Clusterplot:
         cbar_kwargs: Mapping = None,
         **kwargs,
     ) -> Tuple[Mapping, Mapping, ScalarMappable, NDArray]:
-        levelsc, levelscf, extend, sym = create_levels(to_plot, nlevels, sym)
+        levelsc, levelscf, extend, sym = create_levels(to_plot, nlevels, sym, start)
 
         if cmap is None and sym:
             cmap = "seismic"
@@ -477,17 +501,21 @@ class Clusterplot:
             cmap = mpl.colormaps[cmap]
         if transparify:
             if isinstance(transparify, int):
-                cmap = make_transparent(cmap, nlev=len(levelscf), n_transparent=transparify, sym=sym)
+                cmap = make_transparent(
+                    cmap, nlev=len(levelscf), n_transparent=transparify, sym=sym
+                )
             elif isinstance(transparify, float):
-                cmap = make_transparent(cmap, nlev=len(levelscf), alpha_others=transparify, sym=sym)
+                cmap = make_transparent(
+                    cmap, nlev=len(levelscf), alpha_others=transparify, sym=sym
+                )
             else:
                 cmap = make_transparent(cmap, nlev=len(levelscf), sym=sym)
-                
+
         if cbar_kwargs is None:
             cbar_kwargs = {}
-                
-        if cbar_label is not None: # backwards compat
-            cbar_kwargs['label'] = cbar_label
+
+        if cbar_label is not None:  # backwards compat
+            cbar_kwargs["label"] = cbar_label
 
         norm = BoundaryNorm(levelscf, cmap.N, extend=extend)
         im = ScalarMappable(norm=norm, cmap=cmap)
@@ -495,14 +523,19 @@ class Clusterplot:
         if contours or clabels is not None:
             self.add_contour(to_plot, nlevels, sym, clabels)
 
-        return dict(
-            transform=ccrs.PlateCarree(),
-            levels=levelscf,
-            cmap=cmap,
-            norm=norm,
-            extend=extend,
-            **kwargs,
-        ), cbar_kwargs, im, levelsc
+        return (
+            dict(
+                transform=ccrs.PlateCarree(),
+                levels=levelscf,
+                cmap=cmap,
+                norm=norm,
+                extend=extend,
+                **kwargs,
+            ),
+            cbar_kwargs,
+            im,
+            levelsc,
+        )
 
     def add_contourf(
         self,
@@ -511,6 +544,7 @@ class Clusterplot:
         lat: NDArray = None,
         nlevels: int = None,
         sym: bool = None,
+        start: float = None,
         cmap: str | Colormap = None,
         transparify: bool | float | int = False,
         contours: bool = False,
@@ -523,22 +557,29 @@ class Clusterplot:
         **kwargs,
     ) -> ScalarMappable:
         assert len(to_plot) <= len(self.axes)
-        
+
         lon, lat = setup_lon_lat(to_plot, lon, lat)
-        
-        kwargs, cbar_kwargs, im, levelsc = self.setup_contourf(to_plot, nlevels, sym, cmap, transparify, contours, clabels, cbar_label, cbar_kwargs, **kwargs)
-        
+
+        kwargs, cbar_kwargs, im, levelsc = self.setup_contourf(
+            to_plot,
+            nlevels,
+            sym,
+            start,
+            cmap,
+            transparify,
+            contours,
+            clabels,
+            cbar_label,
+            cbar_kwargs,
+            **kwargs,
+        )
+
         for ax, toplt in zip(self.axes, to_plot):
             try:
                 toplt = toplt.values
             except AttributeError:
                 pass
-            ax.contourf(
-                lon,
-                lat,
-                toplt,
-                **kwargs
-            )
+            ax.contourf(lon, lat, toplt, **kwargs)
 
             if self.lambert_projection and self.boundary is not None:
                 ax.set_boundary(self.boundary, transform=ccrs.PlateCarree())
@@ -567,10 +608,8 @@ class Clusterplot:
         color: str | list = "black",
         hatch: str = "..",
     ) -> None:
-        to_test = [
-            da.isel(time=mas) for mas in mask.T
-        ]
-        
+        to_test = [da.isel(time=mas) for mas in mask.T]
+
         lon = da.lon.values
         lat = da.lat.values
         significances = []
@@ -601,60 +640,26 @@ class Clusterplot:
         mask: NDArray,
         type: str = "contourf",
         stippling: bool | str = False,
-        nlevels: int = None,
-        sym: bool = None,
-        transparify: bool | float = False,
-        clabels: Union[bool, list] = None,
-        draw_gridlines: bool = False,
-        draw_cbar: bool = True,
-        cbar_label: str = None,
-        titles: Iterable = None,
-        colors: list | str = None,
-        linestyles: list | str = None,
-        cbar_kwargs: Mapping = None,
         **kwargs,
     ) -> ScalarMappable | None:
         to_plot = [da.isel(time=mas).mean(dim="time") for mas in mask.T]
         if type == "contourf":
             im = self.add_contourf(
                 to_plot,
-                nlevels=nlevels,
-                sym=sym,
-                transparify=transparify,
                 contours=False,
                 clabels=None,
-                draw_gridlines=draw_gridlines,
-                draw_cbar=draw_cbar,
-                cbar_label=cbar_label,
-                titles=titles,
-                cbar_kwargs=cbar_kwargs,
                 **kwargs,
             )
         elif type == "contour":
             self.add_contour(
                 to_plot,
-                nlevels=nlevels,
-                sym=sym,
-                clabels=clabels,
-                draw_gridlines=draw_gridlines,
-                titles=titles,
-                colors=colors,
-                linestyles=linestyles,
                 **kwargs,
             )
             im = None
         elif type == "both":
             im = self.add_contourf(
                 to_plot,
-                nlevels=nlevels,
-                sym=sym,
-                transparify=transparify,
                 contours=True,
-                clabels=clabels,
-                draw_gridlines=draw_gridlines,
-                draw_cbar=draw_cbar,
-                cbar_label=cbar_label,
-                titles=titles,
                 **kwargs,
             )
         else:
@@ -665,7 +670,7 @@ class Clusterplot:
             if isinstance(stippling, str):
                 color = stippling
             else:
-                color = 'black'
+                color = "black"
             self.add_stippling(da, mask, color=color)
         return im
 
@@ -836,3 +841,144 @@ def kde(
     if return_x:
         return midpoints, kde
     return kde
+
+
+def create_double_composite(
+    ds: Dataset,
+    props_as_ds: Dataset,
+    min_hotspell_length: int = 4,
+    max_hotspell_length: int = 5,
+    subset: list = None,
+    fig_kwargs: dict = None,
+):
+    duncan_mask = np.abs(xr.open_dataarray(f"{DATADIR}/ERA5/cluster_def.nc"))
+    ds_masked = ds.where(ds.hotspell_length >= min_hotspell_length).where(
+        ds.hotspell_length <= max_hotspell_length
+    )
+    lon, lat = duncan_mask.lon.values, duncan_mask.lat.values
+    inverse_landmask = duncan_mask.copy()
+    inverse_landmask[:] = 1
+    inverse_landmask = inverse_landmask.where(duncan_mask.isnull())
+    centers = {}
+    for i, region in enumerate(REGIONS):
+        com = center_of_mass((duncan_mask == i + 1).values)
+        mean_lat = lat[int(com[0])] + (com[0] % 1) * (lat[1] - lat[0])
+        mean_lon = lon[int(com[1])] + (com[1] % 1) * (lon[1] - lon[0])
+        duncan_mask = duncan_mask.where(
+            (duncan_mask != i + 1) | (duncan_mask.lat < mean_lat), duncan_mask + 0.1
+        )
+        centers[region] = [mean_lon, mean_lat]
+    if subset is None:
+        subset = list(props_as_ds.data_vars)
+    if fig_kwargs is None:
+        fig_kwargs = {}
+    default_fig_kwargs = {'nrows': 3, 'ncols': 4, 'figsize': (22, 8)}
+    fig_kwargs = default_fig_kwargs | fig_kwargs
+    fig, axes = plt.subplots(
+        subplot_kw={"projection": ccrs.PlateCarree()}, **fig_kwargs
+    )
+    fig.subplots_adjust(wspace=0.03)
+    axes = axes.ravel()
+    cmap_polar = cmaps.BlueRed
+    cmap_subtropical = cmaps.GreenYellow_r
+    norm = Normalize(-1.1, 1.1)
+    for i, varname in enumerate(subset):
+        da_polar = duncan_mask.copy()
+        da_subtropical = duncan_mask.copy()
+        for ir, region in enumerate(ds_masked.region.values):
+            val_polar = (
+                ds_masked[varname]
+                .sel(jet="polar", region=region, day_after_beg=np.arange(-3, 4))
+                .mean()
+            )
+            val_polar = (
+                val_polar - props_as_ds[varname].sel(jet="polar").mean()
+            ) / props_as_ds[varname].sel(jet="polar").std()
+
+            val_subtropical = (
+                ds_masked[varname]
+                .sel(jet="subtropical", region=region, day_after_beg=np.arange(-3, 4))
+                .mean()
+            )
+            val_subtropical = (
+                val_subtropical - props_as_ds[varname].sel(jet="subtropical").mean()
+            ) / props_as_ds[varname].sel(jet="subtropical").std()
+
+            da_polar = da_polar.where(duncan_mask != ir + 1.1, val_polar)
+            da_polar = da_polar.where(duncan_mask != ir + 1, np.nan)
+            da_subtropical = da_subtropical.where(
+                duncan_mask != ir + 1, val_subtropical
+            )
+            da_subtropical = da_subtropical.where(duncan_mask != ir + 1.1, np.nan)
+        im_polar = axes[i].pcolormesh(
+            lon,
+            lat,
+            da_polar.values,
+            shading="nearest",
+            transform=ccrs.PlateCarree(),
+            norm=norm,
+            cmap=cmap_polar,
+        )
+        im_subtropical = axes[i].pcolormesh(
+            lon,
+            lat,
+            da_subtropical.values,
+            shading="nearest",
+            transform=ccrs.PlateCarree(),
+            norm=norm,
+            cmap=cmap_subtropical,
+        )
+        axes[i].pcolormesh(
+            lon,
+            lat,
+            inverse_landmask,
+            shading="nearest",
+            transform=ccrs.PlateCarree(),
+            cmap="Greys",
+            vmin=0.95,
+            vmax=1.05,
+        )
+        axes[i].contour(
+            lon,
+            lat,
+            duncan_mask.values / 6,
+            levels=7,
+            colors="black",
+            lw=0.1,
+        )
+        axes[i].set_title(PRETTIER_VARNAME[varname], fontsize=30)
+        axes[i].axis("off")
+    if fig_kwargs['ncols'] * fig_kwargs['nrows'] > len(subset):
+        N = 6
+        cmap2 = LinearSegmentedColormap.from_list(
+            "hehe", cmaps.agsunset(np.linspace(1 / N, 1 - 1 / N, N))
+        )
+        axes[-1].pcolormesh(
+            lon,
+            lat,
+            duncan_mask.values / N,
+            shading="nearest",
+            transform=ccrs.PlateCarree(),
+            cmap=cmap2,
+        )
+
+        for i, region in enumerate(REGIONS):
+            axes[-1].text(
+                *centers[region],
+                region,
+                transform=ccrs.PlateCarree(),
+                va="bottom" if region == "Arctic" else "center",
+                ha="center",
+            )
+        axes[-1].axis("off")
+
+    cbar_polar = fig.colorbar(im_polar, ax=fig.axes, pad=0.015, fraction=0.04)
+    cbar_polar.ax.set_ylabel("Norm. anomaly (polar jet)", fontsize=27)
+    cbar_polar.ax.yaxis.set_label_position("left")
+    cbar_polar.ax.set_yticks(np.linspace(-1, 1, 9), [""] * 9)
+    cbar_polar.ax.yaxis.set_ticks_position("left")
+    cbar_subtropical = fig.colorbar(
+        im_subtropical, ax=fig.axes, pad=0.007, fraction=0.04
+    )
+    cbar_subtropical.ax.set_ylabel("Norm. anomaly (subtropical jet)", fontsize=27)
+    return fig, axes, cbar_polar, cbar_subtropical

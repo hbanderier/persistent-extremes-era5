@@ -1,30 +1,31 @@
-from ast import Attribute
 import os
 import platform
 from time import perf_counter
 
 import numpy as np
-from sklearn.cluster import DBSCAN, AgglomerativeClustering
-from sklearn.metrics import pairwise_distances
-from sklearn.metrics.pairwise import haversine_distances
-
 try:
     import cupy as cp  # won't work on cpu nodes
 except ImportError:
     pass
 import pickle as pkl
 from pathlib import Path
+from itertools import combinations, combinations_with_replacement, permutations, product
 from typing import Any, Optional, Tuple, Union, Iterable
+
+from sklearn.cluster import DBSCAN, AgglomerativeClustering
+from sklearn.metrics import pairwise_distances, roc_auc_score
+from sklearn.metrics.pairwise import haversine_distances
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
 
 import pandas as pd
 import xarray as xr
+from skimage.filters import frangi
 from tqdm import trange, tqdm
 from cdo import Cdo
-from skimage.filters import frangi
 from nptyping import Float, Int, NDArray, Object, Shape
 from multiprocessing import Pool
 from functools import partial
-from itertools import permutations
 from scipy.signal import find_peaks
 from scipy.stats import norm
 from numba import njit
@@ -84,7 +85,7 @@ ZOO = [
     "Mea",
 ]
 
-REGIONS = ["South", "West", "Balkans", "Scandinavia", "Russia", "Arctic"]
+REGIONS = ["S-W", "West", "S-E", "North", "East", "N-E"]
 
 SMALLNAME = {
     "Geopotential": "z",
@@ -92,6 +93,34 @@ SMALLNAME = {
     "Temperature": "t",
     "Precipitation": "tp",
 }  # Wind speed
+
+PRETTIER_VARNAME = {
+    'mean_lon': 'Avg. Longitude',
+    'mean_lat': 'Avg. Latitude',
+    'Lon': 'Lon. of max. speed',
+    'Lat': 'Lat. of max. speed',
+    'Spe': 'Max. speed',
+    'lon_ext': 'Extent in lon.',
+    'lat_ext': 'Extent in lat.',
+    'tilt': 'Tilt',
+    'int_over_europe': 'Int. speed over Europe',
+    'int_all': 'Integrated speed',
+    'persistence': 'Persistence',
+}
+
+LATEXY_VARNAME = {
+    'mean_lon': '$\overline{\lambda}$',
+    'mean_lat': '$\overline{\phi}$',
+    'Lon': '$\lambda_{s^*}$',
+    'Lat': '$\phi_{s^*}$',
+    'Spe': '$s^*$',
+    'lon_ext': '$\Delta \lambda$',
+    'lat_ext': '$\Delta \phi$',
+    'tilt': r'$\overline{\frac{\mathrm{d}\phi}{\mathrm{d}\lambda}}$',
+    'int_over_europe': '$\int_{\mathrm{Eur.}} s \mathrm{d}\lambda$',
+    'int_all': '$\int s \mathrm{d}\lambda$',
+    'persistence': '$\Delta t$',
+}
 
 RADIUS = 6.371e6  # m
 OMEGA = 7.2921e-5  # rad.s-1
@@ -268,6 +297,10 @@ def apply_hotspells_mask_v2(
             maxnhs = max(maxnhs, len(region))
             for hotspell in region:
                 maxlen = max(maxlen, len(hotspell))
+    hotspell_length = np.zeros((len(regions), maxnhs))
+    hotspell_length[:] = np.nan
+    for i, hss in enumerate(hotspells):
+        hotspell_length[i, :len(hss)] = [len(hs) - lag_behind for hs in hss]
     data = {}
     other_coord = list(ds.coords.items())[1]
     for varname in ds.data_vars:
@@ -294,6 +327,7 @@ def apply_hotspells_mask_v2(
                     ).values.T
                 except KeyError:
                     ...
+    ds_masked = ds_masked.assign_coords({'hotspell_length': (('region', 'hotspell'), hotspell_length)})
     return ds_masked
 
 
@@ -705,6 +739,20 @@ def props_to_ds(all_props: list, time: NDArray | xr.DataArray = None, maxnjet: i
         coords={time_name: time, 'jet': np.arange(maxnjet)}
     )
     return ds
+
+
+def categorize_ds_jets(props_as_ds: xr.Dataset):
+    time_name, time_val = list(props_as_ds.coords.items())[0]
+    ds = xr.Dataset(coords={time_name: time_val, 'jet': ['subtropical', 'polar']})
+    for varname in props_as_ds.data_vars:
+        if varname == 'is_polar':
+            continue
+        cond = props_as_ds['is_polar']
+        values = np.zeros((len(time_val), 2))
+        values[:, 0] = props_as_ds[varname].where(1 - cond).mean(dim='jet').values
+        values[:, 1] = props_as_ds[varname].where(cond).mean(dim='jet').values
+        ds[varname] = ((time_name, 'jet'), values)
+    return ds
     
     
 def all_jets_to_one_array(all_jets: list):
@@ -872,3 +920,27 @@ def add_persistence_to_props(ds_props: xr.Dataset, flags: NDArray):
     ds_props['persistence'] = (names, jet_persistence_prop)
     return ds_props
     
+    
+def comb_logistic_regression(y: NDArray, ds: xr.Dataset, all_combinations: list):
+    coefs = np.zeros((len(all_combinations), len(all_combinations[0])))
+    scores = np.zeros(len(all_combinations))
+    for j, comb in enumerate(all_combinations):
+        X = np.nan_to_num(np.stack([ds[varname][:, jet].values for varname, jet in comb], axis=1), nan=0)
+        log = LogisticRegression().fit(X=X, y=y)
+        coefs[j, :] = log.coef_[0]
+        scores[j] = roc_auc_score(y, log.predict_proba(X)[:, 1])
+    return coefs, scores
+
+
+def all_logistic_regressions(ds: xr.Dataset, n_predictors: int, Y: xr.DataArray | NDArray):
+    predictors = list(product(ds.data_vars, [0, 1]))
+    all_combinations = list(combinations(predictors, n_predictors))
+    func = partial(comb_logistic_regression, ds=ds, all_combinations=all_combinations)
+    try:
+        Y = Y.values
+    except AttributeError:
+        pass
+    with Pool(processes=Y.shape[1]) as pool:
+        results = list(tqdm(pool.imap(func, Y.T, chunksize=1)))
+    coefs, scores = zip(*results)
+    return np.stack(coefs, axis=0), np.stack(scores, axis=0)

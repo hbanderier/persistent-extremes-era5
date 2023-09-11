@@ -3,7 +3,6 @@ import pickle as pkl
 import logging
 import glob
 from dataclasses import dataclass
-from itertools import product
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Tuple, Iterable
 import warnings
