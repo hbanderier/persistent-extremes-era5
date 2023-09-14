@@ -32,6 +32,7 @@ import cartopy.crs as ccrs
 import cartopy.feature as feat
 
 from definitions import (
+    trange, tqdm,
     DATADIR,
     REGIONS,
     PRETTIER_VARNAME,
