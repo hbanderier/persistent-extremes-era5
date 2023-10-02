@@ -3,6 +3,43 @@ import networkx as nx
 from itertools import pairwise, permutations, combinations
 
 
+def compute_distance_matrix_(points):
+    points_weighed = points[:, [1, 0]]
+    dist_matrix = haversine_distances(np.radians(points_weighed))
+    if points.shape[1] <= 3:
+        return dist_matrix
+    return np.sqrt(dist_matrix ** 2 + (points[:, None, 2] - points[None, :, 2]) ** 2)
+
+
+def find_jets_2D_(points, eps, kind="AgglomerativeClustering"):
+    dist_matrix = compute_distance_matrix_(points)
+    if kind == "DBSCAN":
+        model = DBSCAN(
+            eps=eps,
+            metric="precomputed",
+        )
+    elif kind == "AgglomerativeClustering":  # strategy pattern ?
+        model = AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=eps,
+            metric="precomputed",
+            linkage="single",
+        )
+    elif kind == "HDBSCAN":  # strategy pattern ?
+        model = HDBSCAN(
+            min_cluster_size=100,
+            cluster_selection_epsilon=eps,
+            metric='precomputed',
+        )
+    elif kind == "OPTICS":  # strategy pattern ?
+        model = OPTICS(
+            metric='precomputed',
+        )
+    labels = model.fit(dist_matrix).labels_
+    masks = labels_to_mask(labels)
+    return labels, masks
+
+
 def find_jets(
     X,
     lon: NDArray,
@@ -216,3 +253,107 @@ def find_jets_v3(X, lon, lat, len_cutoff=20):
             sp = np.asarray([lon[sp[:, 1]], lat[sp[:, 0]], X[sp[:, 0], sp[:, 1]]]).T
             sps.append(sp)
     return sps
+
+
+def update_jet(jet: NDArray):
+    x, y, s = jet.T
+    x_, c_ = np.unique(x, return_index=True)
+    s_split = np.split(s, c_[1:])
+    y_ = np.empty(len(s_split))
+    s_ = np.empty(len(s_split))
+    for i, sp in enumerate(s_split):
+        j = np.argmax(sp) + c_[i]
+        y_[i] = y[j]
+        s_[i] = s[j]
+    return np.stack([x_, y_, s_], axis=-1)
+
+
+def find_jets_2D(
+    da: xr.DataArray, height=15, eps: float = 10, sigmas: Iterable = None, cutoff: float = 1500, kind: str = 'DBSCAN'
+) -> list:
+    if sigmas is None:
+        sigmas = range(8, 24, 5)
+    lon, lat = da.lon.values, da.lat.values
+    res = lon[1] - lon[0]
+    cutoff = cutoff / res
+    X = da.values
+    Xmax = X.max()
+    X_norm = X / Xmax
+    X_prime = frangi(X_norm, black_ridges=False, sigmas=sigmas, cval=1) * Xmax
+    points = []
+    for i, x in enumerate(X_prime.T):
+        lo = lon[i]
+        peaks = find_peaks(x, height=height, distance=10, width=2)[0]
+        for peak in peaks:
+            points.append([lo, lat[peak], X[peak, i]])
+    for j, x in enumerate(X_prime):
+        la = lat[j]
+        peaks = find_peaks(x, height=height, distance=10, width=2)[0]
+        for peak in peaks:
+            points.append([lon[peak], la, X[j, peak]])
+    if len(points) == 0:
+        return []
+    points = np.atleast_2d(points)
+    argsort = np.argsort(points[:, 0])
+    points = points[argsort, :]
+    eps = eps * np.radians(res)
+    labels, masks = find_jets_2D_(points, eps=eps, kind=kind) 
+    potential_jets = [points[mask] for mask in masks.T]
+
+    jets = [jet for jet in potential_jets if np.sum(jet[:, 2]) > cutoff]
+    sorted_order = np.argsort(
+        [np.average(jet[:, 1], weights=jet[:, 2]) for jet in jets]
+    )
+    return [update_jet(jets[i]) for i in sorted_order]
+
+
+def find_jets_3D(da: xr.DataArray, height=20, eps: float = 10, sigmas: Iterable = None, vert_factor=2, kind: str = 'HDBSCAN'):
+    if sigmas is None:
+        sigmas = range(10, 21, 5)
+    alts = vert_factor * metpy.calc.pressure_to_height_std(da.lev).values
+    lon, lat = da.lon.values, da.lat.values
+    all_points = []
+    for il, X in enumerate(da.values):
+        points = []
+        Xmax = X.max()
+        X_norm = X / Xmax
+        X_prime = frangi(X_norm, black_ridges=False, sigmas=range(10, 21, 5), cval=1) * Xmax
+        for i, x in enumerate(X_prime.T):
+            lo = lon[i]
+            peaks = find_peaks(x, height=height, distance=10, width=1)[0]
+            for peak in peaks:
+                points.append([lo, lat[peak], alts[il], X[peak, i]])
+        for j, x in enumerate(X_prime):
+            la = lat[j]
+            peaks = find_peaks(x, height=height, distance=20000, width=5)[0]
+            for peak in peaks:
+                points.append([lon[peak], la, alts[il], X[j, peak]])
+        points = np.atleast_2d(points)
+        argsort = np.argsort(points[:, 0])
+        points = points[argsort, :]
+        all_points.append(points)
+    all_points = np.concatenate(all_points)
+    
+    labels, masks = find_jets_2D_(all_points, eps, kind=kind)
+        
+    split_idx = 1 + np.where(np.diff(all_points[:, 2]))[0]
+    split_labels = np.split(labels, split_idx)
+    max_label = np.amax(labels)
+    for il, labels in enumerate(split_labels):
+        unique, idxs, counts = np.unique(
+            labels, return_counts=True, return_index=True
+        )
+        for un, co, idx in zip(unique, counts, idxs):
+            if (co > 30) or (un == -1):
+                continue
+            split_labels[il][idx] = -1
+            max_label = max_label + 1
+            if il == 0:
+                continue
+            for iln in range(il + 1, len(split_labels)):
+                split_labels[iln][split_labels[iln] == un] = max_label
+                
+    split_points = np.split(all_points, split_idx)
+    split_masks = [labels_to_mask(labels) for labels in split_labels]  
+    jets = [[points[mask] for mask in masks.T] for masks, points in zip(split_masks, split_points)]
+    return jets, split_labels 

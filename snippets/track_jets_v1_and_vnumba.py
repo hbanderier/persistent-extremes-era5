@@ -218,3 +218,33 @@ def extract_props_over_time_old(jet):
         for t, timestep in enumerate(timesteps):
             props_over_time[varname][t] = jet[timestep][1][varname]
     return props_over_time
+
+
+def jet_overlap(jet1: NDArray, jet2: NDArray) -> bool:
+    x1, y1 = jet1[:, :2].T
+    x2, y2 = jet2[:, :2].T
+    mask12 = np.isin(x1, x2)
+    mask21 = np.isin(x2, x1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        vert_dist = np.mean(np.abs(y1[mask12] - y2[mask21]))
+    return (np.mean(mask12) > 0.75) and (vert_dist < 5)
+
+def concat_levels(jets1: list, jets2: list) -> Tuple[list, list]:
+    jets = jets1.copy()
+    added = []
+    for jet in jets1:
+        for j, otherjet in enumerate(jets2):
+            if not jet_overlap(jet, otherjet):
+                jets.append(otherjet)
+                added.append(j)
+    return jets, added
+    
+def check_polar(high_jets: list, low_jets: list) -> NDArray:  
+    # is_polar = [np.average(jet[:, 1], weights=jet[:, -1]) > 45 for jet in high_jets]
+    is_polar = np.zeros(len(high_jets), dtype=bool)
+    for i, jet in enumerate(high_jets):
+        for other_jet in low_jets:
+            if jet_overlap(jet, other_jet) or (np.average(jet[:, 1], weights=jet[:, -1]) > 50):
+                is_polar[i] = True
+    return is_polar

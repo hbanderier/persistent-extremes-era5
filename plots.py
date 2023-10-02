@@ -1,12 +1,15 @@
-from contourpy import contour_generator
+from itertools import product
+from typing import Any, Mapping, Tuple, Union, Iterable
+from nptyping import NDArray, Object
+
 import numpy as np
 from scipy.stats import gaussian_kde
 from scipy.interpolate import LinearNDInterpolator
 from scipy.ndimage import center_of_mass
 import xarray as xr
 from xarray import DataArray, Dataset
-from typing import Any, Mapping, Optional, Sequence, Tuple, Union, Iterable
-from nptyping import Float, Int, NDArray, Object, Shape
+from contourpy import contour_generator
+from tqdm import tqdm, trange
 
 import matplotlib as mpl
 from matplotlib import path as mpath
@@ -32,24 +35,13 @@ import cartopy.crs as ccrs
 import cartopy.feature as feat
 
 from definitions import (
-    trange, tqdm,
     DATADIR,
     REGIONS,
     PRETTIER_VARNAME,
-    field_significance,
     LATBINS,
     infer_sym,
 )
-
-
-# COLORS5 = [  # https://coolors.co/palette/ef476f-ffd166-06d6a0-118ab2-073b4c
-#     "#ef476f",  # pinky red
-#     "#ffd166",  # yellow
-#     "#06d6a0",  # cyany green
-#     "#118ab2",  # light blue
-#     "#073b4c",  # dark blue
-#     "#F3722C",  # Orange
-# ]
+from stats import field_significance, field_significance_v2
 
 COLORS5 = [
     "#167e1b",
@@ -342,7 +334,7 @@ class Clusterplot:
             region = (-60, 70, 20, 80)  # Default region ?
         self.region = region
         self.minlon, self.maxlon, self.minlat, self.maxlat = region
-        if lambert_projection:
+        if self.lambert_projection:
             self.central_longitude = (self.minlon + self.maxlon) / 2
             projection = ccrs.LambertConformal(
                 central_longitude=self.central_longitude,
@@ -367,15 +359,18 @@ class Clusterplot:
                 self.nrow,
                 self.ncol,
                 figsize=(6.5 * self.ncol, 6.5 * self.ncol * ratio),
-                constrained_layout=True,
+                constrained_layout=not lambert_projection,
                 subplot_kw={"projection": projection},
             )
         self.axes = np.atleast_1d(self.axes).flatten()
         for ax in self.axes:
-            ax.set_extent(
-                [self.minlon, self.maxlon, self.minlat, self.maxlat],
-                crs=ccrs.PlateCarree(),
-            )
+            if self.lambert_projection:
+                ax.set_boundary(self.boundary, transform=ccrs.PlateCarree())
+            else:
+                ax.set_extent(
+                    [self.minlon, self.maxlon, self.minlat, self.maxlat],
+                    crs=ccrs.PlateCarree(),
+                )
             ax.add_feature(COASTLINE)
             # ax.add_feature(BORDERS, transform=ccrs.PlateCarree())
 
@@ -450,6 +445,8 @@ class Clusterplot:
             colors = "black"
         if not sym and linestyles is None:
             linestyles = "solid"
+        if 'cmap' in kwargs and kwargs['cmap'] is not None:
+            colors=None
 
         for ax, toplt in zip(self.axes, to_plot):
             cs = ax.contour(
@@ -465,9 +462,9 @@ class Clusterplot:
             )
 
             if isinstance(clabels, bool) and clabels:
-                ax.clabel(cs)
+                ax.clabel(cs, fontsize=11)
             elif isinstance(clabels, list):
-                ax.clabel(cs, levels=clabels)
+                ax.clabel(cs, levels=clabels, fontsize=11)
 
             if self.lambert_projection and self.boundary is not None:
                 ax.set_boundary(self.boundary, transform=ccrs.PlateCarree())
