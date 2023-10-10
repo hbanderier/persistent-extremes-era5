@@ -1,25 +1,23 @@
 import pandas as pd
 import numpy as np
-import os
-from definitions import DATADIR, YEARSPL
+from pathlib import Path
+from jetstream_hugo.definitions import DATADIR, YEARSPL
 import cdsapi
 
 
 def main():
+    basepath = Path(f'{DATADIR}/ERA5/t/6H')
     c = cdsapi.Client()
     for year in range(1940, 2023):
-        filename = f'{DATADIR}/ERA5/Wind/200_250/raw/{year}.nc'
-        if os.path.isfile(filename):
+        path = basepath.joinpath(f'{year}.nc')
+        if path.is_file():
             continue
         c.retrieve(
-            'reanalysis-era5-pressure-levels',
+            'reanalysis-era5-single-levels',
             {
                 'product_type': 'reanalysis',
                 'format': 'netcdf',
-                'variable': ['u_component_of_wind', 'v_component_of_wind'],
-                'pressure_level': [
-                    '200', '250'
-                ],
+                'variable': '2m_temperature',
                 'year': str(year),
                 'month': [
                     '01', '02', '03',
@@ -44,11 +42,11 @@ def main():
                     '00:00', '06:00', '12:00',
                     '18:00',
                 ],
-		'area': [90, -100, 0, 100],
+                'area': [90, -100, 0, 100],
                 'grid': '0.5/0.5',
                 'format': 'netcdf',
             },
-            filename)
+            path)
         
 
 if __name__ == '__main__':
