@@ -9,4 +9,5 @@ Figures
 *.png
 *.pdf
 *.nc
+*.code-workspace
 results
