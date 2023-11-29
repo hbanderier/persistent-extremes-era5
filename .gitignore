@@ -3,6 +3,7 @@ __pycache__
 .vscode
 cdo_commands.log
 Figures
+logs
 *.npy
 *.json
 *.out
