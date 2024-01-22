@@ -87,3 +87,22 @@ def get_hotspell_lag_mask(da_time: xr.DataArray | NDArray, num_lags: int = 1) ->
             except KeyError:
                 ...
     return hs_mask
+
+from cdo import Cdo
+cdo = Cdo()
+basepath = Path(f"{DATADIR}/ERA5/thetalev")
+fl1 = basepath.joinpath("u").joinpath("6H").glob("*.nc")
+fl2 = basepath.joinpath("v").joinpath("6H").glob("*.nc")
+for file1, file2 in tqdm(zip(fl1, fl2), total=64):
+    dest_file = basepath.joinpath("s").joinpath("6H").joinpath(file1.name)
+    if dest_file.is_file():
+        continue
+    print(file1.stem)
+    cdo.chname(
+        "u,s",
+        input="-sqrt -add -sqr -selname,U "
+        + file1.as_posix()
+        + " -sqr -selname,V "
+        + file2.as_posix(),
+        output=dest_file.as_posix(),
+    )
