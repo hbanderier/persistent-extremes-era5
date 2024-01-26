@@ -4,7 +4,7 @@ import cdsapi
 
 
 def main():
-    basepath = Path(f"{DATADIR}/ERA5/plev/")
+    basepath = Path(f"{DATADIR}/ERA5/thetalev/")
     c = cdsapi.Client()
     for year in range(1959, 1960):
         path = basepath.joinpath(f"usv{year}JJA.nc")
