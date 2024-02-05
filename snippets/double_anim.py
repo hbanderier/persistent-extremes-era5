@@ -116,3 +116,13 @@ def animate(i):
 
 ani = FuncAnimation(fig, animate, frames=np.arange(len(tsteps)))
 ani.save("Figures/double_anim.gif", dpi=200, fps=5)
+
+
+# mask = ((times.dt.season == "JJA") & (times.dt.year == year)).values
+# indices = np.where(mask)[0]
+# jets = all_jets[indices[0] : indices[-1]]  # janky
+# times = times[mask]
+# flags_ = flags.loc[times].values
+# minflag, maxflax = flags_.min(), flags_[flags_ < 13000].max()
+# COLORS = colormaps.BlAqGrYeOrReVi200(np.linspace(0, 1, maxflax - minflag + 1))
+# flags_ -= minflag

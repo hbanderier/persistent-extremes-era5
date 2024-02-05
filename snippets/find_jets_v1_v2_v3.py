@@ -357,3 +357,162 @@ def find_jets_3D(da: xr.DataArray, height=20, eps: float = 10, sigmas: Iterable 
     split_masks = [labels_to_mask(labels) for labels in split_labels]  
     jets = [[points[mask] for mask in masks.T] for masks, points in zip(split_masks, split_points)]
     return jets, split_labels 
+
+
+def define_blobs_generic(
+    criterion: xr.DataArray,
+    *append_to_groups: xr.DataArray,
+    criterion_threshold: float = 0,
+    distance_function: Callable = pairwise_distances,
+    distance_threshold: float = 0.75,
+    min_size: int = 50,
+) -> Tuple[list, list]:
+    lon, lat = criterion.lon.values, criterion.lat.values
+    if "lev" in criterion.dims:
+        maxlev = criterion.argmax(dim="lev")
+        append_to_groups = [atg.isel(lev=maxlev) for atg in append_to_groups]
+        append_to_groups.append(criterion.lev[maxlev])
+        criterion = criterion.isel(lev=maxlev)
+    X = criterion.values
+    idxs = np.where(X > criterion_threshold)
+    append_names = [atg.name for atg in append_to_groups]
+    append_to_groups = [atg.values[idxs[0], idxs[1]] for atg in append_to_groups]
+    points = np.asarray([lon[idxs[1]], lat[idxs[0]], *append_to_groups]).T
+    points = pd.DataFrame(points, columns=["lon", "lat", *append_names])
+    dist_matrix = distance_function(points[["lon", "lat"]].to_numpy())
+    if isinstance(dist_matrix, tuple):
+        real_dist_mat, dist_matrix = dist_matrix
+    else:
+        real_dist_mat = dist_matrix.copy()
+    labels = (
+        AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=distance_threshold,
+            metric="precomputed",
+            linkage="single",
+        )
+        .fit(dist_matrix)
+        .labels_
+    )
+    masks = labels_to_mask(labels)
+    valid_masks = [mask for mask in masks.T if np.sum(mask) > min_size]
+    groups = [points.iloc[mask] for mask in valid_masks]
+    dist_mats = [real_dist_mat[mask, :][:, mask] for mask in valid_masks]
+    return groups, dist_mats
+
+
+def define_blobs_wind_speed(
+    ds: xr.Dataset,
+    criterion_threshold: float = 25.0,
+    distance_function: Callable = pairwise_distances,
+    distance_threshold: float = 0.75,
+    min_size: int = 750,
+) -> Tuple[list, list]:
+    return define_blobs_generic(
+        ds["s_smo"],
+        ds["s"],
+        ds["lev"] if "lev" in ds else None,
+        criterion_threshold=criterion_threshold,
+        distance_function=distance_function,
+        distance_threshold=distance_threshold,
+        min_size=min_size,
+    )
+
+
+def define_blobs_spensberger(
+    ds: xr.Dataset,
+    criterion_threshold: float = -60,
+    distance_function: Callable = my_pairwise,
+    distance_threshold: float = 0.75,
+    min_size: int = 40,
+) -> Tuple[list, list]:
+    return define_blobs_generic(
+        -ds["criterion"],
+        ds["s"],
+        ds["criterion"],
+        ds["lev"] if "lev" in ds else None,
+        criterion_threshold=-criterion_threshold,
+        distance_function=distance_function,
+        distance_threshold=distance_threshold,
+        min_size=min_size,
+    )
+    
+    
+def refine_jets_shortest_path_larger(
+    ds: xr.Dataset,
+    groups: list[pd.DataFrame],
+    dist_mats: list[NDArray],
+    compute_weights: Callable = default_compute_weights,
+    jet_cutoff: float = 7.5e3,
+) -> list[NDArray]:
+    jets = []
+    for group in groups:
+        x = group["lon"].to_numpy()
+        y = group["lat"].to_numpy()
+        a, b = np.polyfit(x, y, deg=1)
+        distance_to_line = np.abs(a * x - y + b) / np.sqrt(a**2 + 1)
+        maxdist = distance_to_line.max()
+        ux = np.unique(x)
+        if (-180 in ux) and (179.5 in ux):
+            first = ux[np.argmax(np.diff(np.append([ux[-1]], ux)))]
+            x[x < first] += 360
+        else:
+            first = np.amin(ux)
+        xmin, xmax = np.amin(x), np.amax(x)
+        ymin, ymax = np.amin(y), np.amax(y)
+        dy = 0.5
+        dx = 0.5
+        xmesh, ymesh = np.meshgrid(
+            np.arange(xmin, xmax + dx, dx), np.arange(ymin, ymax + dy, dy)
+        )
+        distance_to_line_2 = np.abs(a * xmesh - ymesh + b) / np.sqrt(a**2 + 1)
+        mask = distance_to_line_2 <= (maxdist)
+        xmesh[xmesh >= 180] -= 360
+        append_names = [col for col in group.columns if col not in ["lon", "lat"]]
+        append_to_mesh = [ds[col] for col in append_names]
+        if "lev" in ds.dims:
+            maxlev = ds["s_smo"].argmax(dim="lev")
+            append_to_mesh = [atm.isel(lev=maxlev) for atm in append_to_mesh]
+        append_to_mesh = [slice_1d(atm, [ymesh[mask], xmesh[mask]]) for atm in append_to_mesh]
+        mesh = np.asarray([xmesh[mask], ymesh[mask], *append_to_mesh]).T
+        mesh = pd.DataFrame(mesh, columns=group.columns)
+        grid_to_mesh = np.argmax(
+            (xmesh[mask][:, None] == x[None, :])
+            & (ymesh[mask][:, None] == y[None, :]),
+            axis=0,
+        )
+        dist_mat = pairwise_distances(np.asarray([xmesh[mask], ymesh[mask]]).T)
+        is_nei = (dist_mat > 0) & (dist_mat < 1)
+        weights = compute_weights(ds, mesh, is_nei)
+        masked_weights = np.ma.array(weights, mask=~is_nei)
+        graph = csgraph_from_masked(masked_weights)
+        candidates = np.where(mesh["lon"] == first)[0]
+        im = candidates[np.argmax(mesh["s"].iloc[candidates])]
+        dmat, Pr = shortest_path(
+            graph, directed=False, return_predecessors=True, indices=im
+        )
+        furthest = grid_to_mesh[np.argsort(dist_mat[im, grid_to_mesh])][::-1]
+        splits = get_splits(mesh["s"].to_numpy(), Pr.copy(), furthest, jet_cutoff)
+        jets.extend(jets_from_predecessor(mesh, splits, Pr, jet_cutoff))
+    return merge_jets(jets, 1.5)
+
+
+def merge_jets(jets: list[pd.DataFrame], threshold: float = 1.5) -> list[NDArray]:
+    to_merge = []
+    for (i1, j1), (i2, j2) in pairwise(enumerate(jets)):
+        if np.amin(pairwise_distances(j1[["lon", "lat"]].to_numpy(), j2[["lon", "lat"]].to_numpy())) < threshold:
+            for merger in to_merge:
+                if i1 in merger:
+                    merger.append(i2)
+                    break
+                if i2 in merger:
+                    merger.append(i1)
+                    break
+            to_merge.append([i1, i2])
+    newjets = []
+    for i, jet in enumerate(jets):
+        if not any([i in merger for merger in to_merge]):
+            newjets.append(jet)
+    for merger in to_merge:
+        newjets.append(pd.concat([jets[k] for k in merger]))
+    return newjets
