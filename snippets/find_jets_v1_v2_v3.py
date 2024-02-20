@@ -516,3 +516,47 @@ def merge_jets(jets: list[pd.DataFrame], threshold: float = 1.5) -> list[NDArray
     for merger in to_merge:
         newjets.append(pd.concat([jets[k] for k in merger]))
     return newjets
+
+
+def create_and_separate_graphs(
+    masked_weights: np.ma.array,
+    points: pd.DataFrame,
+    distance_matrix: NDArray,
+    min_size: int = 400,
+) -> Tuple[Sequence[csr_matrix], Sequence[pd.DataFrame], list[NDArray]]:
+    graph = csgraph_from_masked(masked_weights)
+    nco, labels = connected_components(graph)
+    masks = labels_to_mask(labels).T
+    extremities_ = [get_extremities(mask, distance_matrix) for mask in masks]
+    to_merge = []
+    for (im1, mask1), (im2, mask2) in pairwise(enumerate(masks)):
+        extremities1 = extremities_[im1]
+        extremities2 = extremities_[im2]
+        this_dist_mat = distance_matrix[extremities1, :][:, extremities2]
+        i, j = np.unravel_index(np.argmin(this_dist_mat), this_dist_mat.shape)
+        i, j = extremities1[i], extremities2[j]
+        if distance_matrix[i, j] < 2:
+            to_merge.append([im1, im2])
+            masked_weights[i, j] = (
+                0.1  # doesn't matter i guess, as long as it's between 0 and 1 excluded
+            )
+            masked_weights.mask[i, j] = False
+
+    groups = []
+    graphs = []
+    dist_mats = []
+    for im, mask in enumerate(masks):
+        if not any([im in merger for merger in to_merge]):
+            if np.sum(mask) < min_size:
+                continue
+            groups.append(points.iloc[mask])
+            graphs.append(graph[mask, :][:, mask])
+            dist_mats.append(distance_matrix[mask, :][:, mask])
+    for merger in to_merge:
+        mask = np.sum([masks[k] for k in merger], axis=0).astype(bool)
+        if np.sum(mask) < min_size:
+            continue
+        groups.append(points.iloc[mask])
+        graphs.append(csgraph_from_masked(masked_weights[mask, :][:, mask]))
+        dist_mats.append(distance_matrix[mask, :][:, mask])
+    return graphs, groups, dist_mats
