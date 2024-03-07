@@ -1,10 +1,22 @@
 #!/bin/python3
 
 import xarray as xr
-from jetstream_hugo.clustering import Experiment
+from jetstream_hugo.definitions import DATADIR, save_pickle
+from jetstream_hugo.data import open_da
+from jetstream_hugo.jet_finding import JetFinder, preprocess, cluster_wind_speed, jets_from_mask
 
-exp_s = Experiment(
-    "ERA5", "plev", "s", "6H", (1940, 2023), None, -80, 30, 20, 75
+
+ds = xr.Dataset()
+ds["s"] = open_da("ERA5", "plev", "s", "6H", (1940, 2022), None, -80, 30, 20, 80, [200, 250, 300]).load()
+ds["u"] = open_da("ERA5", "plev", "u", "6H", (1940, 2022), None, -80, 30, 20, 80, [200, 250, 300]).load()
+ds["v"] = open_da("ERA5", "plev", "v", "6H", (1940, 2022), None, -80, 30, 20, 80, [200, 250, 300]).load()
+qss = xr.open_dataarray(f"{DATADIR}/ERA5/plev/s/6H/results/qs_clim.nc")
+
+jet_finder = JetFinder(
+    preprocess=preprocess,
+    cluster = cluster_wind_speed,
+    refine_jets=jets_from_mask,
 )
-thresholds = xr.open_dataarray("/storage/workspaces/giub_meteo_impacts/ci01/ERA5/plev/s/6H/results/q80_clim.nc")
-exp_s.find_jets(thresholds=thresholds, processes=30, chunksize=1)
+
+jets = jet_finder.call(ds, thresholds=qss[20, :] / 4, processes=50)
+save_pickle(jets, f"{DATADIR}/ERA5/plev/all_jets.pkl")
