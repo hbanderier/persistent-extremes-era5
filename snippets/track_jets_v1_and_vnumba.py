@@ -2,6 +2,21 @@ import numpy as np
 from sklearn.metrics.pairwise import haversine_distances
 from numba import njit, jit
 
+
+from tqdm.auto import tqdm, trange
+basepath = Path(DATADIR).joinpath("ERA5/plev")
+for year in tqdm(YEARS):
+    year_str = str(year).zfill(4)
+    for month in trange(1, 13):
+        outpath = basepath.joinpath(f"s/6H/{year_str}{month}.nc")
+        if outpath.is_file():
+            continue
+        month = str(month).zfill(2)
+        u = xr.open_dataarray(basepath.joinpath(f"u/6H/{year_str}{month}.nc"))
+        v = xr.open_dataarray(basepath.joinpath(f"v/6H/{year_str}{month}.nc"))
+        s = np.sqrt(u ** 2 + v ** 2)
+        s.to_netcdf(basepath.joinpath(f"s/6H/{year_str}{month}.nc"))
+
 @jit
 def track_jets(all_jets, all_props):
     factor = 0.2

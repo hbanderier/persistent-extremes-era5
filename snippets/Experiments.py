@@ -1,3 +1,23 @@
+DATERANGEPL = pd.date_range("19590101", "20211231")
+YEARSPL = np.unique(DATERANGEPL.year)
+DATERANGEPL_SUMMER = DATERANGEPL[np.isin(DATERANGEPL.month, [6, 7, 8])]
+
+DATERANGEPL_EXT = pd.date_range("19400101", "20221231")
+YEARSPL_EXT = np.unique(DATERANGEPL_EXT.year)
+DATERANGEPL_EXT_SUMMER = DATERANGEPL_EXT[np.isin(DATERANGEPL_EXT.month, [6, 7, 8])]
+
+DATERANGEPL_EXT_6H = pd.date_range("19400101", "20230101", freq="6h", inclusive="left")
+DATERANGEPL_EXT_6H_SUMMER = DATERANGEPL_EXT_6H[np.isin(DATERANGEPL_EXT_6H.month, [6, 7, 8])]
+
+DATERANGEML = pd.date_range("19770101", "20211231")
+
+WINDBINS = np.arange(0, 25, 0.5)
+LATBINS = np.arange(15, 75.1, 0.5)
+LONBINS = np.arange(-90, 30, 1)
+DEPBINS = np.arange(-25, 25.1, 0.5)
+
+REGIONS = ["S-W", "West", "S-E", "North", "East", "N-E"]
+
 class DataHandler(object):
     def __init__(
         self,
