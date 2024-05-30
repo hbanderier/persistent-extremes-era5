@@ -11,4 +11,5 @@ logs
 *.pdf
 *.nc
 *.code-workspace
+*.DS_store
 results
