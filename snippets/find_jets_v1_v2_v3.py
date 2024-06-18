@@ -1367,3 +1367,176 @@ def get_extremities(mask: NDArray, distance_matrix: NDArray) -> NDArray:
         last_elements(this_dist_mat, min(this_dist_mat.shape[0], 100))
     )
     return idx[np.unique(extremities)]
+
+
+def compute_criterion_tophat(ds: xr.Dataset):
+    structure = generate_binary_structure(2, 2)
+    crit, smin, smax = to_zero_one(ds["s_smo"].values)
+    thresh = (38 - smin) / (smax - smin)
+    fgnd_crit = crit - thresh
+    mask_bgnd = fgnd_crit < 0
+    fgnd_crit[mask_bgnd] = 0
+    crit = white_tophat(fgnd_crit, structure=structure, mode="constant", cval=1e8)
+    ds["criterion_tophat"] = ds["s_smo"].copy(data=crit)
+    return ds
+
+
+def skeletonize_wrapper(ds: xr.Dataset, threshold: float = 0.):
+    criterion_mask = (ds["criterion_tophat"] > threshold) | (ds_["criterion_spensberger"] < -1e-8)
+    criterion_mask = criterion_mask.values
+    # skel = skeletonize(criterion_mask)
+    # skel = binary_dilation(skel, iterations=2)
+    # skel = skeletonize(skel)
+    skel = criterion_mask
+    return skel
+
+
+def compute_weights(points: pd.DataFrame, distance_matrix: NDArray, is_nei: NDArray) -> np.ma.array:
+    weights_dir = compute_weights_direction(points, distance_matrix, is_nei)
+    weights_dir = np.ma.array(weights_dir, mask=~is_nei)
+    triu = np.triu_indices_from(weights_dir, k=1)
+    tril = np.tril_indices_from(weights_dir, k=-1)
+    cond = weights_dir[triu] < weights_dir[tril]
+    x1, y1, x2, y2 = triu[0][~cond], triu[1][~cond], tril[0][cond], tril[1][cond]
+    weights_dir[x1, y1] = np.nan
+    weights_dir.mask[x1, y1] = True
+    weights_dir[x2, y2] = np.nan
+    weights_dir.mask[x2, y2] = True
+    x, y = np.arange(weights_dir.shape[0]), np.arange(weights_dir.shape[0])
+    weights_dir[x, y] = np.nan
+    weights_dir.mask[x, y] = True
+    weights_speed = compute_weights_wind_speed(points, ~weights_dir.mask)
+    weights_speed = np.ma.array(weights_speed, mask=weights_dir.mask)
+    weights_dir = np.clip(np.where(weights_dir > DIRECTION_THRESHOLD, 3 * weights_dir, 0.0001), 0, 1)
+    weights = 0.1 * weights_dir + 0.9 * weights_speed
+    # is_nei_2 = np.zeros_like(is_nei)
+    # ouais = np.argmin(weights, axis=1)
+    # is_nei_2[np.arange(is_nei_2.shape[0]), ouais] = True
+    # is_nei_2 = is_nei & is_nei_2
+    # weights.mask = ~is_nei_2
+    return weights
+
+
+def graph_from_group(group, and_unweighted: bool = True, full: bool = False):
+    distance_matrix = my_pairwise(group[["lon", "lat"]].to_numpy())
+    sample = np.random.choice(np.arange(distance_matrix.shape[0]), size=100)
+    sample = distance_matrix[sample]
+    dx = np.amin(sample[sample > 0])
+    is_nei = (distance_matrix > 0) & (distance_matrix < (2 * dx))
+    weights = compute_weights(group, distance_matrix, is_nei)
+    graph = csgraph_from_masked(weights)
+    if not and_unweighted:
+        if full:
+            return graph, weights
+        return graph
+    weights_distances = np.ma.array(distance_matrix, mask=~is_nei)
+    graph_uw = csgraph_from_masked(weights_distances)
+    if full:
+        return graph, graph_uw, weights, weights_distances,
+    return graph, graph_uw
+
+
+def subset_graph(group: pd.DataFrame, weights: np.ma.array, mask: NDArray, weights_distances: np.ma.array = None, full: bool = False):
+    group = group.iloc[mask]
+    weights_ = weights[mask, :][:, mask]
+    graph = csgraph_from_masked(weights_)
+    if weights_distances is None and full:
+        return group, graph, weights_
+    if weights_distances is None:
+        return group, graph
+    weights_distances_ = weights_distances[mask, :][:, mask]
+    graph_uw = csgraph_from_masked(weights_distances_)
+    if full:
+        return group, graph, graph_uw, weights_, weights_distances_
+    return group, graph, graph_uw
+
+
+def split_graph(big_group, big_graph, big_weights, big_weights_distances=None, full: bool = False):
+    groups = []
+    graphs = []
+    if full:
+        weights = []
+    if full and big_weights_distances is not None:
+        weights_distances = []
+    if big_weights_distances is not None:
+        graphs_uw = []
+    _, labels = connected_components(big_graph)
+    masks = labels_to_mask(labels)
+    for mask in masks.T:
+        if np.sum(mask) < 35:
+            continue
+        
+        out = subset_graph(big_group, big_weights, mask, big_weights_distances, full=full)
+        if big_weights_distances is not None and not full:
+            group, graph, graph_uw = out
+            groups.append(group)
+            graphs.append(graph)
+            graphs_uw.append(graph_uw)
+        elif big_weights_distances is not None:
+            group, graph, graph_uw, weights_, weights_distances_ = out
+            groups.append(group)
+            graphs.append(graph)
+            graphs_uw.append(graph_uw)
+            weights.append(weights_)
+            weights_distances.append(weights_distances_)
+        elif big_weights_distances is None and full:
+            group, graph, weights_ = out
+            groups.append(group)
+            graphs.append(graph)
+            weights.append(weights_)
+        else:
+            group, graph = out
+            groups.append(group)
+            graphs.append(graph)    
+    if big_weights_distances is not None and not full:
+        return groups, graphs, graphs_uw
+    elif big_weights_distances is not None and full:
+        return groups, graphs, graphs_uw, weights, weights_distances
+    elif big_weights_distances is None and full:
+        return groups, graphs, weights
+    return groups, graphs
+
+
+def best_paths_subset(weights, graph_uw, full: bool = False):
+    nbgraph = csr.csr_to_nbgraph(graph_uw)
+    paths = csr._build_skeleton_path_graph(nbgraph)
+    degrees = np.diff(graph_uw.indptr)
+    
+    subset = np.where(degrees > 2)[0].tolist()
+    if full:
+        paths_list = []
+        losses = []
+    for i in range(paths.shape[0]):
+        start, stop = paths.indptr[i:i + 2]
+        indices = paths.indices[start:stop]
+        length = 0
+        for j in range(len(indices) - 1):
+            j1, j2 = indices[j: j + 2]
+            if weights.mask[j1, j2]:
+                length += weights[j2, j1]
+            else:
+                length += weights[j1, j2]
+        loss = length / len(indices)
+        # if (loss > 0.02) and (len(indices) > 4):
+        #     continue
+        subset.extend(indices)
+        if full:
+            paths_list.append(indices)
+            losses.append(loss)
+    if full:
+        return subset, paths_list, losses
+    return subset
+
+
+def find_main_path(graph):
+    distances, predecessors = shortest_path(graph, return_predecessors=True, directed=True)
+    distances_uw = shortest_path(graph, return_predecessors=False, unweighted=True, directed=True)
+    starts, ends = last_elements(distances_uw, distances_uw.shape[0] // 10)
+    acceptables = first_elements(distances[starts, ends], len(starts) // 2)
+    start = starts[acceptables[0]]
+    end = ends[acceptables[0]]
+    # with warnings.catch_warnings():
+    #     warnings.simplefilter("ignore", category=RuntimeWarning)
+    #     start, end = np.unravel_index(np.argmax(np.nan_to_num(distances_uw ** 4 / distances ** 0.25, nan=10, posinf=0.1)), distances.shape)
+    main_path = path_from_predecessors(predecessors[start].copy(), end)
+    return main_path

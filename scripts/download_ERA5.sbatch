@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name="Download ERA5"
-#SBATCH --time=10:00:00
-#SBATCH --mem-per-cpu=1G
-#SBATCH --cpus-per-task=1
+#SBATCH --time=24:00:00
+#SBATCH --mem-per-cpu=2G
+#SBATCH --cpus-per-task=10
 
 # Your code below this line
-source /storage/homefs/hb22g102/setup_conda.sh
-srun python download_ERA5.py
+mamba activate env11
+srun python download_ERA5_mars.py
