@@ -3,6 +3,7 @@ __pycache__
 .vscode
 cdo_commands.log
 Figures
+Results
 logs
 *.npy
 *.json
@@ -12,4 +13,3 @@ logs
 *.nc
 *.code-workspace
 *.DS_store
-results
