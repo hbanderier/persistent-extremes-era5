@@ -8,6 +8,8 @@ logs
 *.npy
 *.json
 *.out
+*.txt
+*.swp
 *.png
 *.pdf
 *.nc
