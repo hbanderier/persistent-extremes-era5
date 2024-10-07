@@ -1540,3 +1540,142 @@ def find_main_path(graph):
     #     start, end = np.unravel_index(np.argmax(np.nan_to_num(distances_uw ** 4 / distances ** 0.25, nan=10, posinf=0.1)), distances.shape)
     main_path = path_from_predecessors(predecessors[start].copy(), end)
     return main_path
+
+
+def _compute_jet_width_one_side(
+    da: xr.DataArray, normallons: NDArray, normallats: NDArray, slice_: slice
+) -> float:
+    normal_s = slice_1d(
+        da, {"lon": normallons[slice_], "lat": normallats[slice_]}
+    ).values
+    normal_s = np.concatenate([normal_s, [0]])
+    s = normal_s[0]
+    stop = np.argmax(normal_s <= max(s / 2, 25))
+    try:
+        endlo = normallons[slice_][stop]
+        endla = normallats[slice_][stop]
+    except IndexError:
+        endlo = normallons[slice_][-1]
+        endla = normallats[slice_][-1]
+    return haversine(normallons[slice_][0], normallats[slice_][0], endlo, endla)
+
+
+def compute_jet_width(jet: pl.DataFrame, da: xr.DataArray) -> xr.DataArray:
+    lon, lat = da.lon.values, da.lat.values
+    lo, la, s = jet[["lon", "lat", "s"]].to_numpy().T
+    dxds = np.gradient(lo)
+    dyds = np.gradient(la)
+    theta = np.arctan2(dyds, dxds)
+    dn = 0.5
+    t = np.arange(-12, 12 + dn, dn)
+    half_length = len(t) // 2
+    widths = np.zeros(len(jet))
+    for k in range(len(jet)):
+        normallons = np.cos(theta[k] + np.pi / 2) * t + lo[k]
+        normallats = np.sin(theta[k] + np.pi / 2) * t + la[k]
+        mask_valid = (
+            (normallons >= lon.min())
+            & (normallons <= lon.max())
+            & (normallats >= lat.min())
+            & (normallats <= lat.max())
+        )
+        if all(mask_valid):
+            slice_ = slice(half_length, 0, -1)
+            width1 = _compute_jet_width_one_side(da, normallons, normallats, slice_)
+            slice_ = slice(half_length + 1, len(t))
+            width2 = _compute_jet_width_one_side(da, normallons, normallats, slice_)
+            widths[k] = 2 * min(width1, width2)
+        elif np.mean(mask_valid[:half_length]) > np.mean(mask_valid[half_length + 1 :]):
+            slice_ = slice(half_length, 0, -1)
+            widths[k] = 2 * _compute_jet_width_one_side(
+                da, normallons, normallats, slice_
+            )
+        else:
+            slice_ = slice(half_length + 1, -1)
+            widths[k] = 2 * _compute_jet_width_one_side(
+                da, normallons, normallats, slice_
+            )
+    return np.average(widths, weights=s)
+
+
+def compute_jet_props(jet: pl.DataFrame, da: xr.DataArray) -> dict:
+    jet_numpy = jet[["lon", "lat", "s"]].to_numpy()
+    x, y, s = jet_numpy.T
+    dic = {}
+    for optional_ in ["lon", "lat", "lev", "P", "theta"]:
+        if optional_ in jet:
+            dic[f"mean_{optional_}"] = np.average(jet[optional_].to_numpy(), weights=s)
+    dic["mean_spe"] = np.mean(s)
+    dic["is_polar"] = dic["mean_lat"] - 0.4 * dic["mean_lon"] > 40
+    maxind = np.argmax(s)
+    dic["lon_star"] = x[maxind]
+    dic["lat_star"] = y[maxind]
+    dic["spe_star"] = s[maxind]
+    dic["lon_ext"] = np.amax(x) - np.amin(x)
+    dic["lat_ext"] = np.amax(y) - np.amin(y)
+    slope, _, r_value, _, _ = linregress(x, y)
+    dic["tilt"] = slope
+    dic["waviness1"] = 1 - r_value**2
+    dic["waviness2"] = np.sum((y - dic["mean_lat"]) ** 2)
+    sorted_order = np.argsort(x)
+    dic["wavinessR16"] = np.sum(np.abs(np.diff(y[sorted_order]))) / dic["lon_ext"]
+    dic["wavinessDC16"] = (
+        jet_integral_haversine(jet_numpy, x_is_one=True)
+        / RADIUS
+        * degcos(dic["mean_lat"])
+    )
+    dic["wavinessFV15"] = np.average(
+        (jet["v"] - jet["v"].mean()) * np.abs(jet["v"]) / jet["s"] / jet["s"], weights=s
+    )
+    dic["width"] = compute_jet_width(jet[::5], da)
+    if dic["width"] > 1e7:
+        dic["width"] = 0.0
+    try:
+        dic["int_over_europe"] = jet_integral_haversine(jet_numpy[x > -10])
+    except ValueError:
+        dic["int_over_europe"] = 0
+    dic["int"] = jet_integral_haversine(jet_numpy)
+    return dic
+
+
+def compute_jet_props_wrapper(args: Tuple) -> list:
+    jets, da = args
+    props = []
+    for _, jet in jets.group_by("jet ID", maintain_order=True):
+        props.append(compute_jet_width(jet, da))
+    return props
+
+
+def compute_jet_width_wrapper(args: Tuple) -> list:
+    jets, da = args
+    props = []
+    for _, jet in jets.group_by("jet ID", maintain_order=True):
+        props.append(compute_jet_props(jet, da))
+    df = pl.from_dicts(props)
+    return df
+
+
+def compute_all_jet_props(
+    all_jets_one_df: pl.DataFrame,
+    da: xr.DataArray,
+    processes: int = N_WORKERS,
+    chunksize: int = 100,
+) -> xr.Dataset:
+    len_, iterator = create_mappable_iterator(all_jets_one_df, [da])
+    print("Computing jet properties")
+    all_props_dfs = map_maybe_parallel(
+        iterator,
+        compute_jet_props_wrapper,
+        len_=len_,
+        processes=processes,
+        chunksize=chunksize,
+    )
+    index_columns = get_index_columns(all_props_dfs)
+    all_props_df = pl.concat(all_props_dfs)
+    cast_arg = {
+        key: (pl.Boolean if key == "is_polar" else pl.Float32)
+        for key in all_props_df.columns
+    }
+    all_props_df = all_props_df.cast(cast_arg)
+    all_props_df = all_props_df.to_pandas().set_index(index_columns)
+    return xr.Dataset.from_dataframe(all_props_df)

@@ -1,13 +1,13 @@
-#!/bin/python3
-
+from jetstream_hugo.jet_finding import JetFindingExperiment
+from jetstream_hugo.data import DataHandler
+from multiprocessing import freeze_support
 import xarray as xr
-from jetstream_hugo.definitions import DATADIR
-from jetstream_hugo.jet_finding import MultiVarExperiment
 
-
-exp = MultiVarExperiment("ERA5", "plev", ["u", "v", "s"], "6H", "all", None, -80, 30, 20, 80, [150, 200, 250, 300, 350])
-
-thresholds = xr.open_dataarray(f"{DATADIR}/ERA5/plev/results/qs_clim.nc")
-thresholds = thresholds[20, :].reset_coords("quantile", drop=True)
-
-all_jets, where_are_jets, all_jets_one_array = exp.find_jets(thresholds=thresholds, processes=48, chunksize=200)
+if __name__ == '__main__':
+    freeze_support()
+    ds_cesm = xr.open_dataset("/storage/workspaces/giub_meteo_impacts/ci01/CESM2/flat_wind/ds.zarr", engine="zarr")
+    ds_cesm = ds_cesm.chunk({"member": 1, "time": 100, "lat": -1, "lon": -1})
+    dh = DataHandler(ds_cesm, "/storage/workspaces/giub_meteo_impacts/ci01/CESM2/flat_wind/results")
+    exp_cesm = JetFindingExperiment(dh)
+    jets_cesm, _, _ = exp_cesm.track_jets()
+    props_cesm = exp_cesm.props_as_df(True)

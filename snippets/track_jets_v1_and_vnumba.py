@@ -263,3 +263,100 @@ def check_polar(high_jets: list, low_jets: list) -> NDArray:
             if jet_overlap(jet, other_jet) or (np.average(jet[:, 1], weights=jet[:, -1]) > 50):
                 is_polar[i] = True
     return is_polar
+
+
+
+
+def jet_overlap_values(jet1: NDArray, jet2: NDArray) -> Tuple[float, float]:
+    _, idx1 = np.unique(jet1[:, 0], return_index=True)
+    _, idx2 = np.unique(jet2[:, 0], return_index=True)
+    x1, y1 = jet1[idx1, :2].T
+    x2, y2 = jet2[idx2, :2].T
+    mask12 = np.isin(x1, x2)
+    mask21 = np.isin(x2, x1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        overlap = (np.mean(mask12) + np.mean(mask21)) / 2
+        vert_dist = np.mean(np.abs(y1[mask12] - y2[mask21]))
+    return overlap, vert_dist
+
+
+# def compute_all_overlaps(
+#     all_jets: list, props_as_ds: xr.Dataset
+# ) -> Tuple[NDArray, NDArray]:
+#     overlaps = np.full(len(all_jets), np.nan)
+#     vert_dists = np.full(len(all_jets), np.nan)
+#     time = props_as_ds.time.values
+#     for i, (jets, are_polar) in enumerate(
+#         zip(all_jets, props_as_ds["is_polar"].values)
+#     ):
+#         nj = min(len(are_polar), len(jets))
+#         if nj < 2 or sum(are_polar[:nj]) == nj or sum(are_polar[:nj]) == 0:
+#             continue
+#         polars = []
+#         subtropicals = []
+#         for jet, is_polar in zip(jets, are_polar):
+#             if is_polar:
+#                 polars.append(jet)
+#             else:
+#                 subtropicals.append(jet)
+#         polars = np.concatenate(polars, axis=0)
+#         subtropicals = np.concatenate(subtropicals, axis=0)
+#         overlaps[i], vert_dists[i] = jet_overlap_values(polars, subtropicals)
+#     overlaps = xr.DataArray(overlaps, coords={"time": time})
+#     vert_dists = xr.DataArray(vert_dists, coords={"time": time})
+#     return overlaps, vert_dists
+
+
+def overlaps_vert_dists_as_da(
+    da: xr.DataArray, all_jets: list, props_as_ds_uncat: xr.Dataset, basepath: Path
+) -> Tuple[xr.DataArray, xr.DataArray]:
+    try:
+        da_overlaps = xr.open_dataarray(basepath.joinpath("overlaps.nc"))
+        da_vert_dists = xr.open_dataarray(basepath.joinpath("vert_dists.nc"))
+    except FileNotFoundError:
+        time, lon = da.time.values, da.lon.values
+        coords = {"time": time, "lon": lon}
+        da_overlaps = xr.DataArray(
+            np.zeros([len(val) for val in coords.values()], dtype=np.float32),
+            coords=coords,
+        )
+        da_overlaps[:] = np.nan
+        da_vert_dists = da_overlaps.copy()
+
+        for it, (jets, are_polar) in tqdm(
+            enumerate(zip(all_jets, props_as_ds_uncat["is_polar"])), total=len(all_jets)
+        ):
+            nj = len(jets)
+            if nj < 2:
+                continue
+            for jet1, jet2 in combinations(jets, 2):
+                _, idx1 = np.unique(jet1[:, 0], return_index=True)
+                _, idx2 = np.unique(jet2[:, 0], return_index=True)
+                x1, y1, s1 = jet1[idx1, :3].T
+                x2, y2, s2 = jet2[idx2, :3].T
+                mask12 = np.isin(x1, x2)
+                mask21 = np.isin(x2, x1)
+                s_ = (s1[mask12] + s2[mask21]) / 2
+                vd_ = np.abs(y1[mask12] - y2[mask21])
+                x_ = xr.DataArray(x1[mask12], dims="points")
+                da_overlaps.loc[time[it], x_] = s_
+                da_vert_dists.loc[time[it], x_] = np.fmax(
+                    da_vert_dists.loc[time[it], x_], vd_
+                )
+        da_overlaps.to_netcdf(basepath.joinpath("overlaps.nc"))
+        da_vert_dists.to_netcdf(basepath.joinpath("vert_dists.nc"))
+    return da_overlaps, da_vert_dists
+
+
+@njit
+def isin(a, b):
+    shape = a.shape
+    a = a.ravel()
+    n = len(a)
+    result = np.full(n, False, dtype=np.bool_)
+    set_b = set(b)
+    for i in range(n):
+        if a[i] in set_b:
+            result[i] = True
+    return result.reshape(shape)
