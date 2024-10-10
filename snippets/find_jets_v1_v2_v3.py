@@ -1679,3 +1679,55 @@ def compute_all_jet_props(
     all_props_df = all_props_df.cast(cast_arg)
     all_props_df = all_props_df.to_pandas().set_index(index_columns)
     return xr.Dataset.from_dataframe(all_props_df)
+
+
+def do_one_int_low(args):
+    jets, da_low_ = args
+    ints = []
+    for _, jet in jets.group_by("jet ID", maintain_order=True):
+        x, y = round_half(jet.select(["lon", "lat"]).to_numpy().T)
+        x_ = xr.DataArray(x, dims="points")
+        y_ = xr.DataArray(y, dims="points")
+        s_low = da_low_.sel(lon=x_, lat=y_).values
+        jet_low = np.asarray([x, y, s_low]).T
+        ints.append(jet_integral_haversine(jet_low))
+    return xr.DataArray(ints, coords={"jet": np.arange(len(ints))})
+
+
+def compute_int_low(  # broken with members
+    all_jets_one_df: pl.DataFrame,
+    props_as_ds: xr.Dataset,
+    exp_low_path: Path,
+    processes: int = N_WORKERS,
+    chunksize: int = 100,
+) -> xr.Dataset:
+    this_path = exp_low_path.joinpath("int_low.nc")
+    if this_path.is_file():
+        props_as_ds["int_low"] = xr.open_dataarray(this_path)
+        props_as_ds["int_ratio"] = props_as_ds["int_low"] / props_as_ds["int"]
+        return props_as_ds
+    print("computing int low")
+    props_as_ds["int_low"] = props_as_ds["mean_lon"].copy()
+
+    da_low = xr.open_dataarray(exp_low_path.joinpath("da.nc"))
+    len_, iterator = create_mappable_iterator(all_jets_one_df, [da_low])
+    all_jet_ints = map_maybe_parallel(
+        iterator, do_one_int_low, len_=len_, processes=processes, chunksize=chunksize
+    )
+
+    props_as_ds["int_low"] = (
+        tuple(props_as_ds.dims),
+        np.stack([jet_ints.values for jet_ints in all_jet_ints]),
+    )
+    props_as_ds["int_ratio"] = props_as_ds["int_low"] / props_as_ds["int"]
+    props_as_ds["int_low"].to_netcdf(exp_low_path.joinpath("int_low.nc"))
+    return props_as_ds
+
+
+def is_polar_v2(props_as_ds: xr.Dataset) -> xr.Dataset:
+    props_as_ds[:, "is_polar"] = (
+        props_as_ds.select("mean_lat") * 200
+        - props_as_ds.select("mean_lon") * 30
+        + props_as_ds.select("int_low") / RADIUS
+    ) > 9000
+    return props_as_ds
