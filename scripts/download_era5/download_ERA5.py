@@ -16,15 +16,18 @@ def retrieve(client, request, year, month):
     if Path(ofile).is_file():
         return
     request.update({"year": year, "month": month})
-    client.retrieve('reanalysis-era5-single-levels', request, ofile)
+    client.retrieve("derived-era5-single-levels-daily-statistics", request, ofile)
     return f"Retrieved {year}, {month}"
     
     
 def main():
     request = {
-        'product_type': 'reanalysis',
-        'variable': [
-            '10m_u_component_of_wind', '10m_v_component_of_wind',
+        "product_type": "reanalysis",
+        "variable": [
+            "2m_temperature",
+            "mean_sea_level_pressure",
+            "sea_surface_temperature",
+            "total_precipitation",
         ],
         'year': '1959',
         'month': '01',
@@ -41,12 +44,12 @@ def main():
             '28', '29', '30',
             '31',
         ],
-        'time': [
-            '00:00', '06:00', '12:00',
-            '18:00',
-        ],
+        "daily_statistic": "daily_mean",
+        "time_zone": "utc+00:00",
+        "frequency": "6_hourly",
         "grid": "0.5/0.5",
         'format': 'netcdf',
+        "area": [90, -180, 0, 180],
     }
     client = cdsapi.Client()
     with ThreadPoolExecutor(max_workers=10) as executor:
