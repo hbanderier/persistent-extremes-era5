@@ -2,7 +2,7 @@ from pathlib import Path
 import numpy as np
 from tqdm import trange
 from jetstream_hugo.data import extract, flatten_by, standardize
-from jetstream_hugo.definitions import DATADIR, _compute
+from jetstream_hugo.definitions import DATADIR, compute
 import argparse
 
 import xarray as xr
