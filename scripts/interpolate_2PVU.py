@@ -1,51 +1,43 @@
 from pathlib import Path
-import numpy as np
-from jetstream_hugo.data import open_da
-from jetstream_hugo.definitions import DATADIR
+import xarray as xr
+from jetstream_hugo.data import standardize, flatten_by
+from jetstream_hugo.definitions import DATADIR, YEARS, KAPPA, compute
 
 
-def find_indices(da_PV, level):
-    switches = np.abs((da_PV <= level).astype(int).diff("lev"))
-    good = switches.any("lev")
-    above = switches.argmax("lev") + 1
-    above = above.where(good, 0)
-    below = (above - 1).where(good, 0)
-    prefactor = (level - da_PV.isel(lev=above)) / (da_PV.isel(lev=below) - da_PV.isel(lev=above))
-    minvar = da_PV.min("lev") >= level
-    maxvar = da_PV.max("lev") <= level
-    return prefactor, above, below, good, minvar, maxvar
+ar_full_37_1h = xr.open_zarr(
+    "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3",
+    chunks=None,
+    storage_options=dict(token="anon"),
+)
+ar_full_37_1h = ar_full_37_1h.sel(
+    time=slice(ar_full_37_1h.attrs["valid_time_start"], ar_full_37_1h.attrs["valid_time_stop"])
+)
+da_temp = standardize(ar_full_37_1h["temperature"])
 
-
-def interpolate_isosurface(da, prefactor, below, above, good, minvar, maxvar):
-    interp_level = (prefactor * (da.isel(lev=below) - da.isel(lev=above))) + da.isel(lev=above)
-    # Handle missing values and instances where no values for surface exist above and below
-    interp_level = interp_level.where(good)
-    interp_level = interp_level.where(good | ~minvar, da.isel(lev=0))
-    interp_level = interp_level.where(good | ~maxvar, da.isel(lev=-1))
-    interp_level = interp_level.reset_coords('lev', drop=True)
-    return interp_level
-
-
-da_lev = None
-varnames = ['u', 'v', 's', 'P', 'theta']
-baseout = Path(DATADIR, "ERA5", "2PVU")
-for year in range(1959, 2023):
-    PV = open_da(
-        "ERA5", "thetalev", "PV", "6H", year
-    ).load()
-    if da_lev is None:
-        da_lev = PV.lev
-    prefactor, above, below, good, minvar, maxvar = find_indices(PV, 2)    
-    del PV
-    for varname in varnames:
-        outpath = baseout.joinpath(Path(varname, '6H', f'{year}.nc'))
-        outpath.parent.mkdir(parents=True, exist_ok=True)
-        if outpath.is_file():
-            continue
-        if varname == 'theta':
-            da = da_lev
-        else:
-            da = open_da("ERA5", "thetalev", varname, "6H", year).load()
-        da = interpolate_isosurface(da, prefactor, below, above, good, minvar, maxvar)
-        da.astype(np.float32).to_netcdf(outpath)
-        del da
+odirs = {
+    f"{level}_{freq}": Path(f"{DATADIR}/ERA5/plev/{level}_wind/{freq}")
+    for level in ["low", "high"] for freq in ["6H", "dailymean"]
+}
+for year in YEARS:
+    opaths = {key: odir.joinpath(f"{year}.nc") for key, odir in odirs.items()}
+    if all([opath.is_file() for opath in opaths.values()]):
+        continue
+    pass
+    ds = xr.open_mfdataset(f"/storage/workspaces/giub_meteo_impacts/ci01/ERA5/plev/?_to_del/6H/{year}??.nc")
+    ds = standardize(ds)
+    ds = compute(ds.sel(lev=[175, 200, 225, 250, 300, 350, 700, 850]), progress_flag=True)
+    this_temp = compute(da_temp.sel(**ds.coords), progress=True)
+    this_temp = this_temp * (1000 / this_temp.lev) ** KAPPA
+    ds["theta"] = this_temp
+    high = ds.sel(lev=[175, 200, 225, 250, 300, 350])
+    low = ds.sel(lev=[700, 850])
+    del ds
+    high = flatten_by(high, "s")
+    high_daily = high.resample(time="1D").mean()
+    high.to_netcdf(opaths["high_6H"])
+    high_daily.to_netcdf(opaths["high_dailymean"])
+    
+    low = flatten_by(low, "s")
+    low_daily = low.resample(time="1D").mean()
+    low.to_netcdf(opaths["low_6H"])
+    low_daily.to_netcdf(opaths["low_dailymean"])
