@@ -1,13 +1,17 @@
+from jetstream_hugo.definitions import DATADIR
 from jetstream_hugo.jet_finding import JetFindingExperiment
 from jetstream_hugo.data import DataHandler
-from multiprocessing import freeze_support
 import xarray as xr
 
 if __name__ == '__main__':
-    freeze_support()
-    ds_cesm = xr.open_dataset("/storage/workspaces/giub_meteo_impacts/ci01/CESM2/flat_wind/ds.zarr", engine="zarr")
-    ds_cesm = ds_cesm.chunk({"member": 1, "time": 100, "lat": -1, "lon": -1})
-    dh = DataHandler(ds_cesm, "/storage/workspaces/giub_meteo_impacts/ci01/CESM2/flat_wind/results")
-    exp_cesm = JetFindingExperiment(dh)
-    jets_cesm, _, _ = exp_cesm.track_jets()
-    props_cesm = exp_cesm.props_as_df(True)
+    ds = xr.open_mfdataset(f"{DATADIR}/ERA5/plev/high_wind/6H/????.nc")
+    dh = DataHandler(ds, f"{DATADIR}/ERA5/plev/high_wind/6H/results")
+    exp = JetFindingExperiment(dh)
+    exp.track_jets()
+    exp.props_as_df(True)
+
+    ds = xr.open_mfdataset(f"{DATADIR}/ERA5/plev/high_wind/dailymean/????.nc")
+    dh = DataHandler(ds, f"{DATADIR}/ERA5/plev/high_wind/dailymean/results")
+    exp = JetFindingExperiment(dh)
+    exp.track_jets()
+    exp.props_as_df(True)
