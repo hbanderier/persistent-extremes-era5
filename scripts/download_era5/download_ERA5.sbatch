@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name="Download ERA5"
-#SBATCH --time=05:00:00
-#SBATCH --mem-per-cpu=2G
+#SBATCH --time=10:00:00
+#SBATCH --mem-per-cpu=5G
 #SBATCH --cpus-per-task=10
 
 # Your code below this line
 mamba activate env11_2
-srun python download_ERA5.py
+srun python download_ERA5_mars.py

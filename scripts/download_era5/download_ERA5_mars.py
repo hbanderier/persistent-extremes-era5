@@ -35,7 +35,7 @@ def main():
     client = cdsapi.Client()
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = [
-            executor.submit(retrieve, client, request.copy(), year, month) for year in YEARS[20:40] for month in range(1, 13)
+            executor.submit(retrieve, client, request.copy(), year, month) for year in YEARS[40:] for month in range(1, 13)
         ]
         for f in as_completed(futures):
             try:
