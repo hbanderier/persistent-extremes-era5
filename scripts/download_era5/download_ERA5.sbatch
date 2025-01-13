@@ -6,4 +6,4 @@
 
 # Your code below this line
 mamba activate env11_2
-srun python download_ERA5_mars.py
+srun python download_ERA5.py
