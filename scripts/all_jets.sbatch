@@ -5,5 +5,6 @@
 #SBATCH --mem-per-cpu=49G
 #SBATCH --cpus-per-task=20
 
-mamba activate env11_2
+source ~/.bashrc
+conda activate env11_2
 srun python all_jets.py 
