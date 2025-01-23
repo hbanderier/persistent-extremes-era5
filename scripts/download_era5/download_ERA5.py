@@ -23,10 +23,7 @@ def retrieve(client, request, year, month):
 def main():
     request = {
         "product_type": "reanalysis",
-        "variable": [
-            "u_component_of_wind",
-            "v_component_of_wind"
-        ],
+        "variable": "geopotential",
         "year": "1982",
         "month": "01",
         "day": [
@@ -46,10 +43,11 @@ def main():
             "00:00", "06:00", "12:00",
             "18:00"
         ],
-        "pressure_level": ["500"],
+        "pressure_level": "500",
         "data_format": "netcdf",
         "download_format": "unarchived",
-        "area": [90, -180, 0, 180]
+        "area": [90, -180, 0, 180],
+        "grid": "0.5/0.5",
     }
     client = cdsapi.Client()
     with ThreadPoolExecutor(max_workers=10) as executor:

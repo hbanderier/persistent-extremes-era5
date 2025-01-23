@@ -5,5 +5,6 @@
 #SBATCH --cpus-per-task=10
 
 # Your code below this line
-mamba activate env11_2
-srun python download_ERA5.py
+source ~/.bashrc
+conda activate env11_2
+srun python download_ERA5_dailymeans.py
