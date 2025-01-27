@@ -1,32 +1,50 @@
 from itertools import product
 from pathlib import Path
 import numpy as np
+import xarray as xr
 import intake
-from dask.diagnostics import ProgressBar
-from jetstream_hugo.data import extract, flatten_by
-from jetstream_hugo.definitions import DATADIR
+from jetstream_hugo.data import extract, flatten_by, standardize
+from jetstream_hugo.definitions import DATADIR, compute, KAPPA
 import argparse
 
+varname_to_search_dict = {
+    "high_wind": ["U", "V", "T"],
+    "mid_wind": ["U", "V"],
+}
+levels_dict = {
+    "high_wind": list(range(14, 18)),
+    "mid_wind": [20],
+}
+experiment_dict = {
+    "past": "historical",
+    "future": "ssp370",
+}
+yearbounds_dict = {
+    "past": (1964, 2015),
+    "future": (2049, 2100),
+}
+
 parser=argparse.ArgumentParser(description="sample argument parser")
-parser.add_argument("year")
+parser.add_argument("period", choices=["past", "future"])
+parser.add_argument("variable", choices=["high_wind", "mid_wind", "PRECL"])
 args=parser.parse_args()
-year = int(args.year)
+period = args.period
+variable = args.variable
 
 url = 'https://raw.githubusercontent.com/NCAR/cesm2-le-aws/main/intake-catalogs/aws-cesm2-le.json'
-varname = ["U", "V"]
-varname_to_search = varname
-basepath = Path(f"{DATADIR}/CESM2/results")
 component = "atm"
-experiment = "historical" if year < 2016 else "ssp370"
+experiment = experiment_dict[period]
+yearbounds = yearbounds_dict[period]
+varname_to_search = varname_to_search_dict[variable]
+levels = levels_dict.get(variable, None)
+out_path = Path(f"{DATADIR}/CESM2/{variable}/{period}.zarr")
 frequency = "daily"
 forcing_variant = "cmip6"
-period = year
 season = None
-minlon = -80
-maxlon = 40
-minlat = 15
-maxlat = 80
-levels = list(range(13, 19))
+minlon = -180
+maxlon = 180
+minlat = 0
+maxlat = 90
 members = "all"
 reduce_da = True
 
@@ -36,7 +54,6 @@ indexers = [[str(idx_) for idx_ in indexer] for indexer in indexers]
 indexers = list(product(*indexers))
 ensemble_keys = [".".join(indexer) for indexer in indexers]
 
-basepath = Path(f"{DATADIR}/CESM2/flat_wind")
 catalog = intake.open_esm_datastore(url)
 catalog_subset = catalog.search(
     variable=varname_to_search,
@@ -51,35 +68,38 @@ dsets = catalog_subset.to_dataset_dict(
 )
 ds = dsets[ensemble_keys[0]]
 
-ds = extract(
-    ds,
-    period=period,
-    season=season,
-    minlon=minlon,
-    maxlon=maxlon,
-    minlat=minlat,
-    maxlat=maxlat,
-    levels=levels,
-    members=members,
-)
+ds = standardize(ds)
 
-ds["s"] = np.sqrt(ds["u"] ** 2 + ds["v"] ** 2)
+if out_path.is_dir():
+    ds_on_disk = xr.open_dataset(out_path)
+    years_on_disk = np.unique(ds_on_disk.time.dt.year.values)
+else:
+    years_on_disk = []
 
-for member in ds.member.values:
-    with open("invalid.txt", "r") as fn:
-        invalids = fn.read().split("\n")
-    if f"{member}-{year}" in invalids:
+for i, year in enumerate(range(*yearbounds)):
+    if year in years_on_disk:
         continue
-    opath = basepath.joinpath(f"{member}-{year}.nc")
-    if opath.is_file():
-        continue
-    ds_ = ds.sel(member=member, time=ds.time.dt.year==year).compute(n_workers=2)
-    try:
-        ds_ = flatten_by(ds_, "s")
-    except ValueError: # some broken members
-        with open("invalid.txt", "a") as fn:
-            fn.write(f"{member}-{year}\n")
-        continue
-    ds_.to_netcdf(opath)
-    print(member, year)
-    
+    ds_ = extract(
+        ds,
+        period=[year],
+        season=season,
+        minlon=minlon,
+        maxlon=maxlon,
+        minlat=minlat,
+        maxlat=maxlat,
+        levels=levels,
+        # members=[i],
+    )
+    ds_["s"] = np.sqrt(ds_["u"] ** 2 + ds_["v"] ** 2)
+    ds_ = compute(ds_, progress_flag=True)
+    ds_ = flatten_by(ds_, "s")
+    if variable == "high_wind":
+        ds_["theta"] = (1000 / ds_["lev"]) ** KAPPA * ds_["t"]
+        ds_ = ds_.drop_vars("t")
+    for varname in (list(ds_.data_vars) + ["lat", "lon"]):
+        ds_[varname] = ds_[varname].astype(np.float32)
+    if i == 0:
+        ds_.to_zarr(out_path, mode="w")
+    else:
+        ds_.to_zarr(out_path, append_dim="time")
+    print(year)
