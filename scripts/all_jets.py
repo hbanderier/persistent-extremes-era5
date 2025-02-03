@@ -1,17 +1,22 @@
 from jetstream_hugo.definitions import DATADIR
-from jetstream_hugo.jet_finding import JetFindingExperiment
+from jetstream_hugo.jet_finding import JetFindingExperiment, get_double_jet_index
 from jetstream_hugo.data import DataHandler
 import xarray as xr
 
 if __name__ == '__main__':
-    # exp = JetFindingExperiment(DataHandler(f"{DATADIR}/ERA5/plev/high_wind/6H/results/6"))
-    # dh_low = DataHandler.from_specs("ERA5", "plev", "mid_wind", "6H", "all", None, -80, 40, 15, 80, "all")
-    # exp.find_jets()
-    # exp.categorize_jets(dh_low.da["s"])
-    # exp.track_jets()
-    # exp.props_as_df()
-    ds_cesm = xr.open_dataset("/storage/workspaces/giub_meteo_impacts/ci01/CESM2/flat_wind/ds.zarr", engine="zarr")
-    ds_cesm = ds_cesm.chunk({"member": 1, "time": 100, "lat": -1, "lon": -1})
-    dh = DataHandler.from_basepath_and_da("/storage/workspaces/giub_meteo_impacts/ci01/CESM2/flat_wind/results", ds_cesm)
-    exp_cesm = JetFindingExperiment(dh)
-    jets_cesm = exp_cesm.find_jets()
+    exp = JetFindingExperiment(DataHandler(f"{DATADIR}/ERA5/plev/high_wind/6H/results/8"))
+    dh_low = DataHandler.from_specs(
+        "ERA5", "plev", "mid_wind", "6H", "all", None, -80, 40, 15, 80, "all"
+    )
+    ds = exp.ds
+    all_jets_one_df = exp.find_jets()
+    all_jets_one_df = exp.categorize_jets(dh_low.da["s"])
+    all_jets_one_df, all_jets_over_time, flags = exp.track_jets()
+    props_as_df_uncat = exp.props_as_df(False)
+    props_as_df = exp.props_as_df(True)
+    all_props_over_time = exp.props_over_time(all_jets_over_time, props_as_df_uncat)
+    ds = exp.ds
+    da = exp.ds["s"]
+    jet_pos_da = exp.jet_position_as_da()
+    props_as_df = get_double_jet_index(props_as_df, jet_pos_da)
+    props_as_df.write_parquet(exp.path.joinpath("props_as_df_extras.parquet"))
