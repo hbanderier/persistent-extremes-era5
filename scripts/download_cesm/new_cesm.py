@@ -5,7 +5,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from jetstream_hugo.definitions import DATADIR, KAPPA, compute
 from jetstream_hugo.data import standardize, flatten_by, extract
 import numpy as np 
+from netCDF4 import Dataset
 import xarray as xr
+import h5py
 import argparse
 
 
@@ -59,12 +61,12 @@ def downloader(varname: str | list, period: str, member: str, timebounds: str, o
     if isinstance(varname_to_search, Sequence):
         ds = xr.merge(
                 [
-                    xr.open_dataset(get_url(var, period, member, timebounds))[var]
+                    xr.open_dataset(get_url(var, period, member, timebounds), engine="h5netcdf")[var]
                     for var in varname_to_search
                 ]
             )
     else:
-        ds = xr.open_dataset(get_url(varname_to_search, period, member, timebounds))[varname_to_search]
+        ds = xr.open_dataset(get_url(varname_to_search, period, member, timebounds), engine="h5netcdf")[varname_to_search]
     ds = standardize(ds)
     ds = extract(
         ds,
