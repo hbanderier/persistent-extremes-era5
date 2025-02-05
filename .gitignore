@@ -15,3 +15,4 @@ logs
 *.nc
 *.code-workspace
 *.DS_store
+ruff.toml
