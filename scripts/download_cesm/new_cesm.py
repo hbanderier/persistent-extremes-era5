@@ -9,6 +9,7 @@ from netCDF4 import Dataset
 import xarray as xr
 import h5py
 import argparse
+import traceback
 
 
 varname_to_search_dict = {
@@ -112,7 +113,7 @@ def main():
             try:
                 print(f.result())
             except Exception as e:
-                print(e.with_traceback())
+                print(traceback.format_exc())
                 print("could not retrieve")
                 
 if __name__ == "__main__":
