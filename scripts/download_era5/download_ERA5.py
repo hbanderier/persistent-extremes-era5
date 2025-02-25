@@ -1,31 +1,33 @@
 from pathlib import Path
-from jetstream_hugo.definitions import DATADIR, YEARS
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import calendar
-import cdsapi
+import cdsapi # pip install cdsapi
 
-basepath = Path(f"{DATADIR}/ERA5/plev")
+basepath = Path("a/b/c/d") # modify this
 
-
-def retrieve(client, request, year, month):
-    last_day = calendar.monthrange(year, month)[1]
-    last_day = str(last_day).zfill(2)
-    month = str(month).zfill(2)
+def retrieve(client, request, year):
     year = str(year).zfill(4)
-    ofile = basepath.joinpath(f'raw/{year}{month}.nc')
+    ofile = basepath.joinpath(f'{year}.nc')
     if Path(ofile).is_file():
         return
-    request.update({"year": year, "month": month})
+    request.update({"year": year})
     client.retrieve("reanalysis-era5-pressure-levels", request, ofile)
-    return f"Retrieved {year}, {month}"
+    return f"Retrieved {year}"
     
     
 def main():
     request = {
         "product_type": "reanalysis",
-        "variable": "geopotential",
+        "variable": [
+            "u_component_of_wind",
+            "v_component_of_wind",
+        ],
         "year": "1982",
-        "month": "01",
+        "month": [
+            "01", "02", "03",
+            "04", "05", "06",
+            "07", "08", "09",
+            "10", "11", "12"
+        ],
         "day": [
             "01", "02", "03",
             "04", "05", "06",
@@ -43,7 +45,7 @@ def main():
             "00:00", "06:00", "12:00",
             "18:00"
         ],
-        "pressure_level": "500",
+        "pressure_level": "250",
         "data_format": "netcdf",
         "download_format": "unarchived",
         "area": [90, -180, 0, 180],
@@ -52,7 +54,7 @@ def main():
     client = cdsapi.Client()
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = [
-            executor.submit(retrieve, client, request.copy(), year, month) for year in YEARS for month in range(1, 13)
+            executor.submit(retrieve, client, request.copy(), year) for year in range(1959, 2023) # modify this if needed
         ]
         for f in as_completed(futures):
             try:
