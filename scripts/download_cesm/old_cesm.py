@@ -88,10 +88,10 @@ for member in ds.member.values:
     opath = basepath.joinpath(f"{member}-{year}.nc")
     if opath.is_file():
         continue
-    ds_ = compute(ds.sel(member=member, time=ds.time.dt.year==year), n_workers=2, progress_flag=True)
     try:
+        ds_ = compute(ds.sel(member=member, time=ds.time.dt.year==year), n_workers=2, progress_flag=False)
         ds_ = flatten_by(ds_, "s")
-    except ValueError: # some broken members
+    except Exception: # I know I know. I think it can only be ValueError (flatten) or aiobotocore.response.AioReadTimeoutError (compute), but it takes too long to test
         with open("invalid.txt", "a") as fn:
             fn.write(f"{member}-{year}\n")
         continue
