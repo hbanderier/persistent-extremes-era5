@@ -6,5 +6,5 @@
 
 # Your code below this line
 source ~/.bashrc
-conda activate env11_2
+conda activate env12
 srun python download_ERA5_dailymeans.py

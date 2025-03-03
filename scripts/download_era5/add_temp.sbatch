@@ -5,5 +5,5 @@
 #SBATCH --cpus-per-task=2
 
 # Your code below this line
-mamba activate env11_2
+mamba activate env12
 srun python add_temp_to_flat_wind.py

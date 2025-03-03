@@ -6,6 +6,7 @@ import polars as pl
 import polars_st as st
 import geopandas as gpd
 from jetstream_hugo.definitions import DATADIR, TIMERANGE, YEARS
+import gc
 
 
 def to_xarray(events: st.GeoDataFrame, dummy_da: xr.DataArray, varname: str):
@@ -83,3 +84,19 @@ for year in YEARS:
     cycl_all_levs = xr.concat(cycl_all_levs.values(), dim="lev").assign_coords(lev=list(cycl_all_levs))
     anti_all_levs.to_netcdf(ofile_anti)
     cycl_all_levs.to_netcdf(ofile_cycl)
+    del anti_all_levs, cycl_all_levs
+    gc.collect()
+    
+    
+basepath = Path(DATADIR, "ERA5", "thetalev")
+for varname in ["apvs", "cpvs"]:
+    path = basepath.joinpath(varname)
+    dest_dir = path.joinpath("dailymean")
+    dest_dir.mkdir(exist_ok=True)
+    for orig_path in tqdm(path.joinpath("6H").glob("????.nc"), total=len(YEARS)):
+        dest_path = dest_dir.joinpath(orig_path.name)
+        if dest_path.is_file():
+            continue
+        da = xr.open_dataset(orig_path)
+        da = da.resample(time="1D").mean()
+        da = da.to_netcdf(dest_path)

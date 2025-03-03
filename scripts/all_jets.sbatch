@@ -6,5 +6,5 @@
 #SBATCH --cpus-per-task=20
 
 source ~/.bashrc
-conda activate env11_2
+conda activate env12
 srun python all_jets.py 
