@@ -4,7 +4,7 @@ from jetstream_hugo.data import DataHandler
 import xarray as xr
 
 if __name__ == '__main__':
-    exp = JetFindingExperiment(DataHandler(f"{DATADIR}/ERA5/plev/high_wind/6H/results/8"))
+    exp = JetFindingExperiment(DataHandler(f"{DATADIR}/ERA5/plev/high_wind/6H/results/1"))
     dh_low = DataHandler.from_specs(
         "ERA5", "plev", "mid_wind", "6H", "all", None, -80, 40, 15, 80, "all"
     )
