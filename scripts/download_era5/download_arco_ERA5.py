@@ -48,7 +48,6 @@ opath_1 = base_path_1.joinpath(f"{year}.nc")
 opath_2 = base_path_2.joinpath(f"{year}.nc")
 if not opath_1.is_file() or not opath_2.is_file():
     six_hourly = compute(six_hourly, progress_flag=True)
-if not opath_1.is_file():
     six_hourly.to_netcdf(opath_1)
 if not opath_2.is_file():
     daily = six_hourly.resample(time="1d").reduce(func)
