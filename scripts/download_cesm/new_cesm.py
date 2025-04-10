@@ -49,6 +49,7 @@ maxlat = 90
     
 def get_url(varname: str, period: str, member: str, timebounds: str):
     experiment = experiment_dict[period]
+    # 6 for 3D variables, 1 for 2D. Expand this list at will
     h = 6 if varname in ["U", "V", "T"] else 1
 
     return fr"https://tds.ucar.edu/thredds/fileServer/datazone/campaign/cgd/cesm/CESM2-LE/atm/proc/tseries/day_1/{varname}/b.e21.{experiment}.f09_g17.LE2-{member}.cam.h{h}.{varname}.{timebounds}.nc?api-token=ayhBFVYTOtGi2LM2cHDn6DjFCoKeCAqt69z8Ezt4#mode=bytes"
@@ -61,11 +62,11 @@ def downloader(varname: str | list, period: str, member: str, timebounds: str, o
     varname_to_search = varname_to_search_dict[varname]
     if isinstance(varname_to_search, Sequence):
         ds = xr.merge(
-                [
-                    xr.open_dataset(get_url(var, period, member, timebounds), engine="h5netcdf")[var]
-                    for var in varname_to_search
-                ]
-            )
+            [
+                xr.open_dataset(get_url(var, period, member, timebounds), engine="h5netcdf")[var]
+                for var in varname_to_search
+            ]
+        )
     else:
         ds = xr.open_dataset(get_url(varname_to_search, period, member, timebounds), engine="h5netcdf")[varname_to_search]
     ds = standardize(ds)
