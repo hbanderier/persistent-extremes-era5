@@ -1,8 +1,8 @@
 import numpy as np
 import xarray as xr
-from jetstream_hugo.definitions import KAPPA
-from jetstream_hugo.data import DataHandler
-from jetstream_hugo.jet_finding import JetFindingExperiment, get_double_jet_index
+from jetutils.definitions import KAPPA
+from jetutils.data import DataHandler
+from jetutils.jet_finding import JetFindingExperiment, get_double_jet_index
 
 
 def main():

@@ -1,8 +1,8 @@
 from pathlib import Path
 from tqdm import tqdm
 import numpy as np
-from jetstream_hugo.definitions import compute, YEARS, DATADIR
-from jetstream_hugo.data import open_da, to_netcdf
+from jetutils.definitions import compute, YEARS, DATADIR
+from jetutils.data import open_da, to_netcdf
 
 
 for type_ in ["apvs", "cpvs"]:
