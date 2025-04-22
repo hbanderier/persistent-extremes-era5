@@ -28,16 +28,16 @@ experiment_dict = {
     "past": "historical",
     "future": "ssp370",
 }
-yearbounds_dict = {
-    "past": np.arange(1960, 2021, 10),
-    "future": np.arange(2045, 2106, 10),
+years = {
+    "past": np.arange(1970, 2010),
+    "future": np.arange(2060, 2100),
 }
 for key, val in yearbounds_dict.items():
     yearbounds_dict[key][-1] = val[-1] - 5
 
 parser=argparse.ArgumentParser(description="sample argument parser")
 parser.add_argument("period", choices=["past", "future"])
-parser.add_argument("variable", choices=["high_wind", "mid_wind"])
+parser.add_argument("variable", choices=list(varname_to_search_dict))
 parser.add_argument("n_workers", default=10, type=int)
 args=parser.parse_args()
 period = args.period

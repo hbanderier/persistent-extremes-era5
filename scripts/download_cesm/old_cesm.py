@@ -8,7 +8,7 @@ import argparse
 
 parser=argparse.ArgumentParser(description="sample argument parser")
 parser.add_argument("year")
-parser.add_argument("varname", choices=["high_wind", "mid_wind"])
+parser.add_argument("varname", choices=["high_wind", "mid_wind", "PRECL", "TS"])
 args=parser.parse_args()
 year = int(args.year)
 varname = args.varname
