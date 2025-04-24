@@ -1,6 +1,8 @@
 # Configure file behaviour at the start of the main function !!
 
 # import packages
+from jetutils.definitions import DATADIR, compute
+from jetutils.data import standardize, smooth
 import intake
 import numpy as np
 import xarray as xr
@@ -18,58 +20,63 @@ def standardize(da: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
 
 
 def main():
-    ## Configure
-    varname = "RAIN"
-    component = "lnd" # for land variables like RAIN, "atm" for atmospheric variables like wind, and "ocn" for ocean variables
-    forcing_variant = "cmip6" # other option is "smbb", which stands for "SMoothed Biomass Burning"
-    out_path = Path("/Users/bandelol/Documents/code_local/data/cesm-test")
-    minlon, maxlon, minlat, maxlat = -30, 40, 20, 80
-    years = {
-        "past": np.arange(1970, 2000),
-        "future": np.arange(2070, 2100),
-    }
-    levels = None # if you need to subselect levels from 3D data, then set their index / indices here, otherwise leave as None
-    members = np.arange(5)
-    out_name_past = f"{varname}_{len(members)}members_{years['past'][0]}-{years['past'][-1]}.nc"
-    out_name_future = f"{varname}_{len(members)}members_{years['future'][0]}-{years['future'][-1]}.nc"
-    
-    col_url = (
-        "https://ncar-cesm2-lens.s3-us-west-2.amazonaws.com/catalogs/aws-cesm2-le.json"
-    )
-    catalog = intake.open_esm_datastore(col_url)
+    for varname in ["PRECL", "TS"]:
+        component = "atm" # for land variables like RAIN, "atm" for atmospheric variables like wind, and "ocn" for ocean variables
+        forcing_variant = "cmip6" # other option is "smbb", which stands for "SMoothed Biomass Burning"
+        out_path = Path(DATADIR, "CESM2", varname)
+        minlon, maxlon, minlat, maxlat = None, None, 0, 90
+        levels = None
+        years = {
+            "past": np.arange(1970, 2010),
+            "future": np.arange(2060, 2100),
+        }
+        experiment_dict = {
+            "past": "historical",
+            "future": "ssp370",
+        }
 
-    catalog_subset = catalog.search(variable=varname, frequency='daily', forcing_variant=forcing_variant)
-    dsets = catalog_subset.to_dataset_dict(storage_options={'anon':True})
+        col_url = (
+            "https://ncar-cesm2-lens.s3-us-west-2.amazonaws.com/catalogs/aws-cesm2-le.json"
+        )
+        catalog = intake.open_esm_datastore(col_url)
 
-    ds_past = dsets[f"{component}.historical.daily.{forcing_variant}"]
-    ds_future = dsets[f"{component}.ssp370.daily.{forcing_variant}"]
+        catalog_subset = catalog.search(variable=varname, frequency='daily', forcing_variant=forcing_variant)
+        dsets = catalog_subset.to_dataset_dict(storage_options={'anon':True})
+        
+        for period in experiment_dict:
 
-    ds_past_ns = (
-        standardize(ds_past)
-        .isel(member_id=members)
-        .isel(time=np.isin(ds_past.time.dt.year, years["past"]))
-        .sel(lon=slice(minlon, maxlon))
-        .sel(lat=slice(minlat, maxlat))
-    )
-    ds_future_ns = (
-        standardize(ds_future)
-        .isel(member_id=members)
-        .isel(time=np.isin(ds_future.time.dt.year, years["future"]))
-        .sel(lon=slice(minlon, maxlon))
-        .sel(lat=slice(minlat, maxlat))
-    )
-    if levels is not None and "lev" in ds_past_ns.dims:
-        ds_past_ns = ds_past_ns.isel(lev=levels)
-        ds_future_ns = ds_future_ns.isel(lev=levels)
+            ds = dsets[f"{component}.{experiment_dict[period]}.daily.{forcing_variant}"]
 
-    with ProgressBar():
-        ds_past_ns = ds_past_ns.load()
-    ds_past_ns.to_netcdf(out_path.joinpath(out_name_past))
-    del ds_past_ns # free up memory
+            ds = (
+                standardize(ds)
+                .reset_coords("time_bnds", drop=True)
+                .squeeze()
+                .isel(time=np.isin(ds.time.dt.year, years[period]))
+                .sel(lon=slice(minlon, maxlon))
+                .sel(lat=slice(minlat, maxlat))
+            )
+            if levels is not None and "lev" in ds.dims:
+                ds = ds.isel(lev=levels)
 
-    with ProgressBar():
-        ds_future_ns = ds_future_ns.load()
-    ds_future_ns.to_netcdf(out_path.joinpath(out_name_future))
+            opath = out_path.joinpath(experiment_dict[period])
+            opath.mkdir(parents=True, exist_ok=True)
+            ds = ds[varname].drop_encoding()
+            ds = ds.chunk({"time": 600})
+            print()
+            saved = ds.to_zarr(opath.joinpath("da.zarr"), compute=False, mode="w")
+            with ProgressBar():
+                saved.compute()
+                
+            ds = xr.open_zarr(opath.joinpath("da.zarr"))
+        
+            clim = ds.groupby("time.dayofyear").mean()
+            clim = smooth(clim, {'dayofyear': ('win', 15)})
+            clim = compute(clim, progress_flag=True)
+            clim.to_zarr(opath.joinpath("clim.zarr"), mode="w")
+            
+            anom = ds.groupby("time.dayofyear") - clim
+            anom = compute(anom, progress_flag=True)
+            anom.to_zarr(opath.joinpath("anom.zarr"), mode="w")
     
     
 if __name__ == "__main__": 

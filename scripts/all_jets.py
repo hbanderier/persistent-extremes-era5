@@ -1,6 +1,6 @@
 from jetutils.definitions import DATADIR
 from jetutils.jet_finding import JetFindingExperiment, get_double_jet_index
-from jetutils.data import DataHandler
+from jetutils.data import DataHandler, coarsen_da
 
 
 if __name__ == '__main__':
@@ -10,7 +10,7 @@ if __name__ == '__main__':
     )
     ds = exp.ds
     all_jets_one_df = exp.find_jets()
-    all_jets_one_df = exp.categorize_jets(dh_low.da["s"])
+    all_jets_one_df = exp.categorize_jets(coarsen_da(dh_low.da["s"], 3, np.amin))
     all_jets_one_df, all_jets_over_time, flags = exp.track_jets()
     props_as_df_uncat = exp.props_as_df(False)
     props_as_df = exp.props_as_df(True)

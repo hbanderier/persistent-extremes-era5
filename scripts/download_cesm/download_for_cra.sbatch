@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name="download_cesm"
-#SBATCH --time=90:00:00
+#SBATCH --time=20:00:00
 #SBATCH --partition="epyc2"
-#SBATCH --mem-per-cpu=30G
+#SBATCH --mem-per-cpu=60G
 #SBATCH --cpus-per-task=4
 
 source ~/.bashrc
