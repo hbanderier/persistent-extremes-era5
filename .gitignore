@@ -16,3 +16,4 @@ logs
 *.code-workspace
 *.DS_store
 ruff.toml
+uv.lock
