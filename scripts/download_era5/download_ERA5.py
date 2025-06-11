@@ -1,8 +1,9 @@
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import cdsapi # pip install cdsapi
+from jetutils.definitions import DATADIR
+from cdsapi import Client
 
-basepath = Path("a/b/c/d") # modify this
+basepath = Path(f"{DATADIR}/ERA5/plev/t300/6H")
 
 def retrieve(client, request, year):
     year = str(year).zfill(4)
@@ -18,8 +19,7 @@ def main():
     request = {
         "product_type": "reanalysis",
         "variable": [
-            "u_component_of_wind",
-            "v_component_of_wind",
+            "temperature",
         ],
         "year": "1982",
         "month": [
@@ -45,14 +45,14 @@ def main():
             "00:00", "06:00", "12:00",
             "18:00"
         ],
-        "pressure_level": "250",
+        "pressure_level": "300",
         "data_format": "netcdf",
         "download_format": "unarchived",
         "area": [90, -180, 0, 180],
         "grid": "0.5/0.5",
     }
-    client = cdsapi.Client()
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    client = Client()
+    with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
             executor.submit(retrieve, client, request.copy(), year) for year in range(1959, 2023) # modify this if needed
         ]
