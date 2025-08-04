@@ -30,7 +30,7 @@ def main():
         'format'  : 'netcdf',
     }
     client = cdsapi.Client()
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
             executor.submit(retrieve, client, request.copy(), year) for year in YEARS
         ]
