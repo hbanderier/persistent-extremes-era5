@@ -156,7 +156,7 @@ cross_phat = pl.read_parquet(exp.path.joinpath("cross_phat.parquet"))
 cross_catd = pl.read_parquet(exp.path.joinpath("cross_catd.parquet"))
 
 spells_list_catd = spells_from_cross_catd(cross_catd, season=summer, q_STJ=0.96, q_EDJ=0.9)
-spells_list = spells_from_cross(phat_jets, cross_phat, dis_polar_thresh=0.15, dist_thresh=1.3e5, season=summer, q_STJ=0.99, q_EDJ=0.95)
+spells_list = spells_from_cross(phat_jets, cross_phat, dis_polar_thresh=0.15, dist_thresh=2e5, season=summer, q_STJ=0.99, q_EDJ=0.95)
 
 spells_from_jet_daily_stj_cs = get_persistent_jet_spells(
     phat_props_catd_summer,
@@ -174,11 +174,11 @@ spells_from_jet_daily_edj_cs = get_persistent_jet_spells(
     minlen=datetime.timedelta(days=6),
     fill_holes=datetime.timedelta(hours=24),
 ).with_columns(spell_of=pl.lit("EDJ"))
-spells_list = spells_list | {
-    "STJ_com": spells_from_jet_daily_stj_cs.cast({"time": pl.Datetime("ms"), "relative_time": pl.Duration("ms")}),
-    "EDJ_com": spells_from_jet_daily_edj_cs.cast({"time": pl.Datetime("ms"), "relative_time": pl.Duration("ms")}),
-}
-spells_list = spells_list | {f"{key}_catd": val for key, val in spells_list_catd.items()}
+#spells_list = spells_list | {
+#    "STJ_com": spells_from_jet_daily_stj_cs.cast({"time": pl.Datetime("ms"), "relative_time": pl.Duration("ms")}),
+#    "EDJ_com": spells_from_jet_daily_edj_cs.cast({"time": pl.Datetime("ms"), "relative_time": pl.Duration("ms")}),
+#}
+#spells_list = spells_list | {f"{key}_catd": val for key, val in spells_list_catd.items()}
 
 for name, spell in spells_list.items():
     print(name, spell["spell"].n_unique())
@@ -251,8 +251,8 @@ def symmetrize_p(
 
 basepath = Path("/storage/homefs/hb22g102/persistent-extremes-era5/Results/jet_rel_comp")
 import os
-for file in basepath.glob("*.nc"):
-    os.remove(file)
+#for file in basepath.glob("*.nc"):
+#    os.remove(file)
 
 clims = {
     "t2m": xr.open_dataarray(exp.path.joinpath("t2m_phat_relative_clim.nc")),
