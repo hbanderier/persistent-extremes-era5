@@ -17,7 +17,7 @@ from jetutils.definitions import (
     polars_to_xarray,
     xarray_to_polars,
 )
-from jetutils.jet_finding import JetFindingExperiment, haversine_from_dl, average_jet_categories, spells_from_cross, spells_from_cross_catd, iterate_over_year_maybe_member, gather_normal_da_jets
+from jetutils.jet_finding import JetFindingExperiment, haversine_from_dl, average_jet_categories, spells_from_cross, spells_from_cross_catd, iterate_over_year_maybe_member, gather_normal_da_jets, track_jets
 from jetutils.plots import gather_normal_da_jets_wrapper, interp_jets_to_zero_one
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import BoundaryNorm
@@ -26,41 +26,32 @@ from pathlib import Path
 from tqdm import tqdm
 import polars.selectors as cs
 
-
-def extract_dynamical_seasons(labels: pl.DataFrame, len_spring: int = 20):    
-    labels = labels.cast({"time": pl.Datetime("ms")})
-    summer_cluster = labels.filter(pl.col("time").dt.month() == 7)["labels"].mode().item()
-    seasons = labels.group_by(
-        pl.col("time").dt.year().alias("year")
-    ).agg(
-        pl.col("time").get((pl.col("labels") == summer_cluster).arg_true().first()).alias("start"),
-        pl.col("time").get((pl.col("labels") == summer_cluster).arg_true().last()).alias("end")
-    ).with_columns(
-        spring=pl.datetime_ranges(pl.col("start") - datetime.timedelta(days=len_spring), pl.col("start"), "6h"),
-        summer=pl.datetime_ranges(pl.col("start"), pl.col("end"), "6h"),
-        autumn=pl.datetime_ranges(pl.col("end"), pl.col("end") + datetime.timedelta(days=len_spring), "6h"),
-    ).drop("year", "start", "end")
-    return [seasons[season].explode().sort() for season in seasons.columns]
-
-dh = DataHandler(f"{DATADIR}/ERA5/plev/high_wind/6H/results/3")
-exp_wind = Experiment(dh)
-centers_kmeans, labels_kmeans = exp_wind.do_kmeans(7, 200)
-spring, summer, autumn = extract_dynamical_seasons(xarray_to_polars(labels_kmeans), 20)
+summer_filter = (
+    pl.datetime_range(
+        start=pl.datetime(1959, 1, 1),
+        end=pl.datetime(2023, 1, 1),
+        closed="left",
+        interval="6h",
+        eager=True,
+        time_unit="ms",
+    )
+    .rename("time")
+    .to_frame()
+    .filter(pl.col("time").dt.month().is_in([6, 7, 8, 9]))
+)
+summer = summer_filter["time"]
 summer_daily = summer.filter(summer.dt.hour() == 0)
 
-
-dh = DataHandler.from_specs("ERA5", "plev", "high_wind", "6H", "all", None, -80, 40, 15, 80)
+dh = DataHandler("/storage/workspaces/giub_meteo_impacts/ci01/ERA5/plev/high_wind/6H/results/7")
 exp = JetFindingExperiment(dh)
+ds = exp.ds
 all_jets_one_df = exp.find_jets(force=False, alignment_thresh=0.6, base_s_thresh=0.55, int_thresh_factor=0.35, hole_size=10)
 all_jets_one_df = exp.categorize_jets(None, ["s", "theta"], force=False, n_init=5, init_params="k-means++", mode="week").cast({"time": pl.Datetime("ms")})
 
 props_uncat = exp.props_as_df(False).cast({"time": pl.Datetime("ms")})
 props_as_df = average_jet_categories(props_uncat, polar_cutoff=0.5)
 
-summer_filter = summer.rename("time").to_frame()
 props_summer = summer_filter.join(props_as_df, on="time")
-ds = exp.ds
-
 phat_filter = (pl.col("is_polar") < 0.5) | ((pl.col("is_polar") > 0.5) & (pl.col("int") > 5e8))
 
 phat_jets = all_jets_one_df.filter(phat_filter)
@@ -155,8 +146,8 @@ phat_props_catd_summer = summer_filter.join(phat_props_catd, on="time")
 cross_phat = pl.read_parquet(exp.path.joinpath("cross_phat.parquet"))
 cross_catd = pl.read_parquet(exp.path.joinpath("cross_catd.parquet"))
 
-spells_list_catd = spells_from_cross_catd(cross_catd, season=summer, q_STJ=0.96, q_EDJ=0.9)
-spells_list = spells_from_cross(phat_jets, cross_phat, dis_polar_thresh=0.15, dist_thresh=2e5, season=summer, q_STJ=0.99, q_EDJ=0.95)
+spells_list_catd = spells_from_cross_catd(cross_catd, season=summer, q_STJ=0.93, q_EDJ=0.7)
+spells_list = spells_from_cross(phat_jets, cross_phat, dis_polar_thresh=0.15, dist_thresh=2e5, season=summer, q_STJ=0.992, q_EDJ=0.97)
 
 spells_from_jet_daily_stj_cs = get_persistent_jet_spells(
     phat_props_catd_summer,
@@ -170,19 +161,19 @@ spells_from_jet_daily_edj_cs = get_persistent_jet_spells(
     phat_props_catd_summer,
     "com_speed",
     jet="EDJ",
-    q=0.8,
+    q=0.77,
     minlen=datetime.timedelta(days=6),
     fill_holes=datetime.timedelta(hours=24),
 ).with_columns(spell_of=pl.lit("EDJ"))
-#spells_list = spells_list | {
-#    "STJ_com": spells_from_jet_daily_stj_cs.cast({"time": pl.Datetime("ms"), "relative_time": pl.Duration("ms")}),
-#    "EDJ_com": spells_from_jet_daily_edj_cs.cast({"time": pl.Datetime("ms"), "relative_time": pl.Duration("ms")}),
-#}
-#spells_list = spells_list | {f"{key}_catd": val for key, val in spells_list_catd.items()}
+# spells_list = spells_list | {
+#     "STJ_com": spells_from_jet_daily_stj_cs.cast({"time": pl.Datetime("ms"), "relative_time": pl.Duration("ms")}),
+#     "EDJ_com": spells_from_jet_daily_edj_cs.cast({"time": pl.Datetime("ms"), "relative_time": pl.Duration("ms")}),
+# }
+# spells_list = spells_list | {f"{key}_catd": val for key, val in spells_list_catd.items()}
+spells_list = {f"{key}_catd": val for key, val in spells_list_catd.items()}
 
 for name, spell in spells_list.items():
     print(name, spell["spell"].n_unique())
-    
 
 kwargs = dict(time_before=datetime.timedelta(hours=24), time_after=datetime.timedelta(hours=24))
 daily_spells_list = {a: make_daily(b, "spell", ["len", "spell_of"]) for a, b in spells_list.items()}
@@ -250,9 +241,10 @@ def symmetrize_p(
 
 
 basepath = Path("/storage/homefs/hb22g102/persistent-extremes-era5/Results/jet_rel_comp")
+
 import os
-#for file in basepath.glob("*.nc"):
-#    os.remove(file)
+for file in basepath.glob("*catd*.nc"):
+   os.remove(file)
 
 clims = {
     "t2m": xr.open_dataarray(exp.path.joinpath("t2m_phat_relative_clim.nc")),
@@ -292,14 +284,19 @@ for day_around in days_around:
         times = spells_from_jet
         for i, (varname, da) in enumerate(tqdm(variable_dict.items())):
             clim = clims[varname]
+            ofile = Path(
+                f"/storage/homefs/hb22g102/persistent-extremes-era5/Results/jet_rel_comp/{da.name}_interp_spells_of_{spells_of}_JJAS_{day_around=}.nc"
+            )
+            if ofile.is_file():
+                continue
             jets_during_spells_with_interp_norm_ds = gather_normal_da_jets_wrapper(
                 jets, times, da, n_bootstraps=n_bootstraps, clim=clim
             )
             try:
                 to_plot = jets_during_spells_with_interp_norm_ds[da.name + "_interp"]
                 pvals = jets_during_spells_with_interp_norm_ds["pvals"]
-                to_plot.to_netcdf(f"/storage/homefs/hb22g102/persistent-extremes-era5/Results/jet_rel_comp/{da.name}_interp_spells_of_{spells_of}_{day_around=}.nc")
-                pvals.to_netcdf(f"/storage/homefs/hb22g102/persistent-extremes-era5/Results/jet_rel_comp/{da.name}_interp_spells_of_{spells_of}_pvals_{day_around=}.nc")
+                to_plot.to_netcdf(ofile)
+                pvals.to_netcdf(f"/storage/homefs/hb22g102/persistent-extremes-era5/Results/jet_rel_comp/{da.name}_interp_spells_of_{spells_of}_JJAS_pvals_{day_around=}.nc")
             except KeyError:
                 to_plot = jets_during_spells_with_interp_norm_ds
-                to_plot.to_netcdf(f"/storage/homefs/hb22g102/persistent-extremes-era5/Results/jet_rel_comp/{da.name}_interp_spells_of_{spells_of}_{day_around=}.nc")
+                to_plot.to_netcdf(ofile)

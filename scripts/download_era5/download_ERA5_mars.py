@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import calendar
 import cdsapi
 
-basepath = Path(f"{DATADIR}/ERA5/thetalev/PV/6H")
+basepath = Path(f"{DATADIR}/ERA5/surf/theta2PVU/6H")
 
 
 def retrieve(client, request, year):
@@ -20,9 +20,9 @@ def retrieve(client, request, year):
 def main():
     request = { 
         'date'    : f'1959-01-01/to/1959-12-31',
-        'levtype' : 'pt',
-        "levelist": "350",
-        'param'   : '60',                  
+        'levtype' : 'pv',
+        "levelist": "2000",
+        'param'   : '3',                  
         'stream'  : 'oper',                  
         'time'    : '00/to/23/by/6', 
         'type'    : 'an',
@@ -30,7 +30,8 @@ def main():
         'format'  : 'netcdf',
     }
     client = cdsapi.Client()
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    ## mars only allows on concurrent request, soo this is useless here. Keeping the Threading because Im too lazy to change it
+    with ThreadPoolExecutor(max_workers=1) as executor:
         futures = [
             executor.submit(retrieve, client, request.copy(), year) for year in YEARS
         ]
