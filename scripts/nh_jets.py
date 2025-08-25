@@ -240,7 +240,7 @@ def symmetrize_p(
     return np.asarray(pvals) < q
 
 
-basepath = Path("/storage/homefs/hb22g102/persistent-extremes-era5/Results/jet_rel_comp")
+basepath: Path = Path("/storage/homefs/hb22g102/persistent-extremes-era5/Results/jet_rel_comp")
 
 import os
 for file in basepath.glob("*catd*.nc"):
