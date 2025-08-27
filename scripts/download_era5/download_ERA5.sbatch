@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name="Download ERA5"
-#SBATCH --time=24:00:00
-#SBATCH --mem-per-cpu=30G
-#SBATCH --cpus-per-task=1
+#SBATCH --time=06:00:00
+#SBATCH --mem-per-cpu=10G
+#SBATCH --cpus-per-task=4
 
 source ~/.bashrc
 conda activate env12
-srun python download_ERA5_mars.py
+srun python download_ERA5.py

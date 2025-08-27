@@ -3,7 +3,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from jetutils.definitions import DATADIR
 from cdsapi import Client
 
-basepath = Path(f"{DATADIR}/ERA5/plev/t300/6H")
+basepath = Path(f"{DATADIR}/ERA5/plev/z200/6H")
+basepath.mkdir(parents=True, exist_ok=True)
 
 def retrieve(client, request, year):
     year = str(year).zfill(4)
@@ -19,7 +20,7 @@ def main():
     request = {
         "product_type": "reanalysis",
         "variable": [
-            "temperature",
+            "geopotential",
         ],
         "year": "1982",
         "month": [
@@ -45,21 +46,21 @@ def main():
             "00:00", "06:00", "12:00",
             "18:00"
         ],
-        "pressure_level": "300",
+        "pressure_level": "200",
         "data_format": "netcdf",
         "download_format": "unarchived",
         "area": [90, -180, 0, 180],
         "grid": "0.5/0.5",
     }
     client = Client()
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
             executor.submit(retrieve, client, request.copy(), year) for year in range(1959, 2023) # modify this if needed
         ]
         for f in as_completed(futures):
             try:
                 print(f.result())
-            except:
+            except Exception:
                 print("could not retrieve")
         
 
