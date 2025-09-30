@@ -3,12 +3,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from jetutils.definitions import DATADIR
 from cdsapi import Client
 
-basepath = Path(f"{DATADIR}/ERA5/plev/z200/6H")
+basepath = Path(f"{DATADIR}/ERA5/plev/high_wind/6H")
 basepath.mkdir(parents=True, exist_ok=True)
 
 def retrieve(client, request, year):
     year = str(year).zfill(4)
-    ofile = basepath.joinpath(f'{year}.nc')
+    ofile = basepath.joinpath(f'{year}_raw.nc')
     if Path(ofile).is_file():
         return
     request.update({"year": year})
@@ -18,11 +18,12 @@ def retrieve(client, request, year):
     
 def main():
     request = {
-        "product_type": "reanalysis",
+        "product_type": ["reanalysis"],
         "variable": [
-            "geopotential",
+            "u_component_of_wind",
+            "v_component_of_wind"
         ],
-        "year": "1982",
+        "year": "2023",
         "month": [
             "01", "02", "03",
             "04", "05", "06",
@@ -46,16 +47,16 @@ def main():
             "00:00", "06:00", "12:00",
             "18:00"
         ],
-        "pressure_level": "200",
+        "pressure_level": ["175", "200", "225", "250", "300", "350"],
         "data_format": "netcdf",
         "download_format": "unarchived",
         "area": [90, -180, 0, 180],
         "grid": "0.5/0.5",
     }
     client = Client()
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=1) as executor:
         futures = [
-            executor.submit(retrieve, client, request.copy(), year) for year in range(1959, 2023) # modify this if needed
+            executor.submit(retrieve, client, request.copy(), year) for year in range(2023, 2025) # modify this if needed
         ]
         for f in as_completed(futures):
             try:
