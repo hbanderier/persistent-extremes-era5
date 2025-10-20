@@ -1,0 +1,52 @@
+[project]
+name = "persistent-extremes-era5"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "autoreload>=0.1.2",
+    "cartopy>=0.25.0",
+    "cdsapi>=0.7.7",
+    "cdsk",
+    "cf-xarray>=0.10.9",
+    "dask>=2025.9.1",
+    "distributed>=2025.9.1",
+    "fasttreeshap",
+    "h5netcdf>=1.6.4",
+    "ipympl>=0.9.8",
+    "ipython>=9.6.0",
+    "jetutils",
+    "jupyter>=1.1.1",
+    "jupyterlab>=4.4.9",
+    "latex>=0.7.0",
+    "matplotlib>=3.10.7",
+    "netcdf4>=1.7.3",
+    "numba>=0.62.1",
+    "numpy>=2.3.3",
+    "polars>=1.34.0",
+    "polars-ds>=0.10.2",
+    "pyarrow>=21.0.0",
+    "rustworkx>=0.17.1",
+    "scikit-learn>=1.7.2",
+    "scipy>=1.16.2",
+    "sdfc",
+    "seaborn>=0.13.2",
+    "simpsom-dask",
+    "tqdm>=4.67.1",
+    "wavebreaking>=0.3.8",
+    "xarray>=2025.10.1",
+    "xgboost>=3.0.5",
+]
+
+[tool.uv.sources]
+simpsom-dask = { path = "../simpsom-dask", editable = true }
+sdfc = { path = "../SDFC-python", editable = true }
+cdsk = { path = "../CDSK-python", editable = true }
+fasttreeshap = { path = "../FastTreeSHAP_numpy2", editable = true }
+jetutils = { path = "../jetutils", editable = true }
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.0.0",
+]
