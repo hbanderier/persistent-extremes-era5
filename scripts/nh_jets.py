@@ -36,9 +36,9 @@ jets = exp.categorize_jets(None, ["s", "theta"], force=False, n_init=15, init_pa
 props_uncat = exp.props_as_df(categorize=False)
 props_as_df = exp.props_as_df(force=0)
 
-phat_filter = (pl.col("is_polar") < 0.5) | ((pl.col("is_polar") > 0.5) & (pl.col("int") > 1.5e8))
+phat_filter = (pl.col("is_polar") < 0.5) | ((pl.col("is_polar") > 0.5) & (pl.col("int") > 1.e8))
 
-phat_jets = jets.filter((pl.col("is_polar").mean().over(["time", "jet ID"]) < 0.5) | ((pl.col("is_polar").mean().over(["time", "jet ID"]) > 0.5) & (pl.col("int").mode().first().over(["time", "jet ID"]) > 1.5e8)))
+phat_jets = jets.filter((pl.col("is_polar").mean().over(["time", "jet ID"]) < 0.5) | ((pl.col("is_polar").mean().over(["time", "jet ID"]) > 0.5) & (pl.col("int").mode().first().over(["time", "jet ID"]) > 1.e8)))
 phat_jets_catd = phat_jets.with_columns(**{"jet ID": (pl.col("is_polar").mean().over(["time", "jet ID"]) > 0.5).cast(pl.UInt32())})
 phat_props = props_uncat.filter(phat_filter)
 phat_props_catd = average_jet_categories(phat_props, polar_cutoff=0.5)
@@ -51,10 +51,10 @@ props_ctrl = phat_props_catd.clone()
 args = ["all", None, -100, 60, 0, 90]
 path = exp.path
 
-# da = open_da("Henrik_data", run, ("high_wind", "PTTEND"), "6H", *args)
-# da = compute(da)
-# create_jet_relative_dataset(jets_ctrl, path, da)
-# del da
+da = open_da("Henrik_data", run, ("high_wind", "PTTEND"), "6H", *args)
+da = compute(da)
+create_jet_relative_dataset(jets_ctrl, path, da)
+del da
 
 da = open_da("Henrik_data", run, ("high_wind", "DTCOND"), "6H", *args)
 da = compute(da)
@@ -76,15 +76,15 @@ run = "dobl"
 
 dh = DataHandler.from_specs("Henrik_data", run, ("high_wind", ["u", "v", "s", "theta", "lev"]), "6H", minlon=-80, maxlon=40, minlat=15, maxlat=80)
 exp = JetFindingExperiment(dh)
-exp.find_jets(force=True, n_coarsen=1, smooth_s=5, alignment_thresh=0.55, base_s_thresh=0.55, int_thresh_factor=0.2, hole_size=5)
+exp.find_jets(force=False, n_coarsen=1, smooth_s=5, alignment_thresh=0.55, base_s_thresh=0.55, int_thresh_factor=0.2, hole_size=5)
 jets = exp.categorize_jets(None, ["s", "theta"], force=False, n_init=15, init_params="k-means++", mode="week").cast({"time": pl.Datetime("ms")})
 
-props_as_df = exp.props_as_df(force=2)
+props_as_df = exp.props_as_df(force=0)
 props_uncat = exp.props_as_df(categorize=False)
 
-phat_filter = (pl.col("is_polar") < 0.5) | ((pl.col("is_polar") > 0.5) & (pl.col("int") > 1.5e8))
+phat_filter = (pl.col("is_polar") < 0.5) | ((pl.col("is_polar") > 0.5) & (pl.col("int") > 1.e8))
 
-phat_jets = jets.filter((pl.col("is_polar").mean().over(["time", "jet ID"]) < 0.5) | ((pl.col("is_polar").mean().over(["time", "jet ID"]) > 0.5) & (pl.col("int").mode().first().over(["time", "jet ID"]) > 1.5e8)))
+phat_jets = jets.filter((pl.col("is_polar").mean().over(["time", "jet ID"]) < 0.5) | ((pl.col("is_polar").mean().over(["time", "jet ID"]) > 0.5) & (pl.col("int").mode().first().over(["time", "jet ID"]) > 1.e8)))
 phat_jets_catd = phat_jets.with_columns(**{"jet ID": (pl.col("is_polar").mean().over(["time", "jet ID"]) > 0.5).cast(pl.UInt32())})
 phat_props = props_uncat.filter(phat_filter)
 phat_props_catd = average_jet_categories(phat_props, polar_cutoff=0.5)
