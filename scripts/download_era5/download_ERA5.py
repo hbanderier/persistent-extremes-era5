@@ -6,14 +6,19 @@ from cdsapi import Client
 basepath = Path(f"{DATADIR}/ERA5/plev/high_wind/6H")
 basepath.mkdir(parents=True, exist_ok=True)
 
-def retrieve(client, request, year):
+def retrieve(client: Client, request: dict, year: int, month: int = None):
     year = str(year).zfill(4)
-    ofile = basepath.joinpath(f'{year}_raw.nc')
+    if month is not None:
+        month = str(month).zfill(2)
+        ofile = basepath.joinpath(f'{year}{month}_raw.nc')
+    else:
+        month = [str(i).zfill(2) for i in range(1, 13)]
+        ofile = basepath.joinpath(f'{year}_raw.nc')
     if Path(ofile).is_file():
         return
-    request.update({"year": year})
+    request.update({"year": year, "month": month})
     client.retrieve("reanalysis-era5-pressure-levels", request, ofile)
-    return f"Retrieved {year}"
+    return f"Retrieved {year}, {month}"
     
     
 def main():
@@ -56,7 +61,7 @@ def main():
     client = Client()
     with ThreadPoolExecutor(max_workers=1) as executor:
         futures = [
-            executor.submit(retrieve, client, request.copy(), year) for year in range(2023, 2025) # modify this if needed
+            executor.submit(retrieve, client, request.copy(), year, month) for year in range(2023, 2025) for month in range(1, 13) # modify this if needed
         ]
         for f in as_completed(futures):
             try:
