@@ -3,18 +3,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from jetutils.definitions import DATADIR
 from cdsapi import Client
 
-basepath = Path(f"{DATADIR}/ERA5/plev/high_wind/6H")
+basepath = Path(f"{DATADIR}/ERA5/plev/uv/6H")
 basepath.mkdir(parents=True, exist_ok=True)
-suffix = "raw"
+suffix = ""
+suffix = f"_{suffix}" if suffix != "" else ""
 
 def retrieve(client: Client, request: dict, year: int, month: int = None):
     year = str(year).zfill(4)
     if month is not None:
         month = str(month).zfill(2)
-        ofile = basepath.joinpath(f'{year}{month}_{suffix}.nc')
+        ofile = basepath.joinpath(f'{year}{month}{suffix}.nc')
     else:
         month = [str(i).zfill(2) for i in range(1, 13)]
-        ofile = basepath.joinpath(f'{year}_{suffix}.nc')
+        ofile = basepath.joinpath(f'{year}{suffix}.nc')
     if Path(ofile).is_file():
         return
     request.update({"year": year, "month": month})
@@ -27,7 +28,8 @@ def main():
         "product_type": ["reanalysis"],
         "variable": [
             "u_component_of_wind",
-            "v_component_of_wind"
+            "v_component_of_wind",
+            "temperature",
         ],
         "year": "2023",
         "month": [
@@ -53,7 +55,7 @@ def main():
             "00:00", "06:00", "12:00",
             "18:00"
         ],
-        "pressure_level": ["175", "200", "225", "250", "300", "350"],
+        "pressure_level": ["250", "850"],
         "data_format": "netcdf",
         "download_format": "unarchived",
         "area": [90, -180, 0, 180],
@@ -62,14 +64,13 @@ def main():
     client = Client()
     with ThreadPoolExecutor(max_workers=1) as executor:
         futures = [
-            executor.submit(retrieve, client, request.copy(), year, month) for year in [2024] for month in [10] # modify this if needed
+            executor.submit(retrieve, client, request.copy(), year) for year in range(1973, 2025) # modify this if needed
         ]
         for f in as_completed(futures):
             try:
                 print(f.result())
             except Exception:
                 print("could not retrieve")
-        
 
 if __name__ == "__main__":
     main()
