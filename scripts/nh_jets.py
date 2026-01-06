@@ -5,25 +5,6 @@ from jetutils.anyspell import *
 from jetutils.plots import *
 from jetutils.geospatial import *
 
-
-def create_jet_relative_dataset(jets, path, da, suffix="", half_length: float = 20.):
-    indexer = iterate_over_year_maybe_member(jets, da)
-    to_average = []
-    varname = da.name + "_interp"
-    for idx1, idx2 in tqdm(indexer, total=len(YEARS)):
-        jets_ = jets.filter(*idx1)
-        da_ = da.sel(**idx2)
-        try:
-            jets_with_interp = gather_normal_da_jets(jets_, da_, half_length=half_length)
-        except (KeyError, ValueError) as e:
-            print(e)
-            break
-        jets_with_interp = interp_jets_to_zero_one(jets_with_interp, [varname, "is_polar"], n_interp=30)
-        jets_with_interp = jets_with_interp.group_by("time", pl.col("is_polar").mean().over(["time", "jet ID"]) > 0.5, "norm_index", "n", maintain_order=True).agg(pl.col(varname).mean())
-        to_average.append(jets_with_interp)
-    pl.concat(to_average).write_parquet(path.joinpath(f"{da.name}{suffix}_relative.parquet"))
-    
-    
     
 run = "ctrl"
 
@@ -57,21 +38,6 @@ phat_props_catd = average_jet_categories(phat_props, polar_cutoff=0.5)
 phat_props_catd = phat_props_catd.join(phat_props_catd.rolling("time", period="2d", group_by="jet").agg(**{f"{col}_var": pl.col(col).var() for col in ["mean_lon", "mean_lat", "mean_s", "s_star"]}), on=["time", "jet"])
 props_ctrl = phat_props_catd.clone()
 props_summer_ctrl = summer_filter.join(props_ctrl, on="time")
-
-opath_cross_ctrl = basepath_ctrl.joinpath("cross_catd.parquet")
-if opath_cross_ctrl.is_file():
-    cross_catd_ctrl = pl.read_parquet(opath_cross_ctrl)
-else:
-    cross_catd_ctrl = track_jets(jets_ctrl, n_next=1)
-    cross_catd_ctrl.write_parquet(opath_cross_ctrl)
-    
-spells_list_ctrl = spells_from_cross_catd(cross_catd_ctrl, season=summer, q_STJ=0.9, q_EDJ=0.885, minlen=datetime.timedelta(days=4))
-
-for name, spell in spells_list_ctrl.items():
-    print(name, spell["spell"].n_unique())
-daily_spells_list_ctrl = {a: make_daily(b, "spell", ["len", "spell_of"]) for a, b in spells_list_ctrl.items()}
-
-
 
 args = ["all", None, -100, 60, 0, 90]
 path = exp.path
@@ -134,20 +100,6 @@ phat_props_catd = average_jet_categories(phat_props, polar_cutoff=0.5)
 phat_props_catd = phat_props_catd.join(phat_props_catd.rolling("time", period="2d", group_by="jet").agg(**{f"{col}_var": pl.col(col).var() for col in ["mean_lon", "mean_lat", "mean_s", "s_star"]}), on=["time", "jet"])
 props_dobl = phat_props_catd.clone()
 props_summer_dobl = summer_filter.join(props_dobl, on="time")
-
-opath_cross_dobl = basepath_dobl.joinpath("cross_catd.parquet")
-if opath_cross_dobl.is_file():
-    cross_catd_dobl = pl.read_parquet(opath_cross_dobl)
-else:
-    cross_catd_dobl = track_jets(jets_ctrl, n_next=1)
-    cross_catd_dobl.write_parquet(opath_cross_dobl)
-    
-spells_list_dobl = spells_from_cross_catd(cross_catd_dobl, season=summer, q_STJ=0.9, q_EDJ=0.885, minlen=datetime.timedelta(days=4))
-
-for name, spell in spells_list_dobl.items():
-    print(name, spell["spell"].n_unique())
-daily_spells_list_dobl = {a: make_daily(b, "spell", ["len", "spell_of"]) for a, b in spells_list_dobl.items()}
-
 
 args = ["all", None, -100, 60, 0, 90]
 path = exp.path
