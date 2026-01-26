@@ -12,6 +12,7 @@ dependencies = [
     "cf-xarray>=0.10.9",
     "dask>=2025.9.1",
     "distributed>=2025.9.1",
+    "ecmwf-api-client>=1.6.5",
     "fasttreeshap",
     "h5netcdf>=1.6.4",
     "ipympl>=0.9.8",

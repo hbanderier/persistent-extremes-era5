@@ -6,8 +6,8 @@ from pathlib import Path
 from jetutils.definitions import DATADIR
 server = ECMWFDataServer()
 
-first_date = (5, 15)
-last_date = (6, 29)
+first_date = (7, 1)
+last_date = (8, 31)
 def date_string(year: int, month: int, day: int):
     year = str(year).zfill(4)
     month = str(month).zfill(2)

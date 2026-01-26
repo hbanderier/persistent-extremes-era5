@@ -5,6 +5,24 @@ from jetutils.anyspell import *
 from jetutils.plots import *
 from jetutils.geospatial import *
 
+
+def create_jet_relative_dataset(jets, path, da, suffix="", half_length: float = 2e6, dn: float = 5e4, n_interp: int = 40, in_meters: bool = True):
+    indexer = iterate_over_year_maybe_member(jets, da)
+    to_average = []
+    varname = da.name + "_interp"
+    for idx1, idx2 in tqdm(indexer, total=len(YEARS)):
+        jets_ = jets.filter(*idx1)
+        da_ = da.sel(**idx2)
+        try:
+            jets_with_interp = gather_normal_da_jets(jets_, da_, half_length=half_length, dn=dn, in_meters=in_meters)
+        except (KeyError, ValueError) as e:
+            print(e)
+            break
+        jets_with_interp = interp_jets_to_zero_one(jets_with_interp, [varname, "is_polar"], n_interp=n_interp)
+        # jets_with_interp = jets_with_interp.group_by("time", pl.col("is_polar").mean().over(["time", "jet ID"]) > 0.5, "norm_index", "n", maintain_order=True).agg(pl.col(varname).mean())
+        to_average.append(jets_with_interp)
+    pl.concat(to_average).write_parquet(path.joinpath(f"{da.name}{suffix}_relative.parquet"))
+
     
 run = "ctrl"
 
@@ -44,27 +62,27 @@ path = exp.path
 
 da = open_da("Henrik_data", run, ("high_wind", "PTTEND"), "6H", *args, levels=30000)
 da = compute(da)
-create_jet_relative_dataset(jets_ctrl, path, da)
+create_jet_relative_dataset(jets_ctrl, path, da, suffix="_meters")
 del da
 
 da = open_da("Henrik_data", run, ("high_wind", "DTCOND"), "6H", *args, levels=30000)
 da = compute(da)
-create_jet_relative_dataset(jets_ctrl, path, da)
+create_jet_relative_dataset(jets_ctrl, path, da, suffix="_meters")
 del da
 
 da = open_da("Henrik_data", run, ("high_wind", "theta"), "6H", *args, levels=30000)
 da = compute(da)
-create_jet_relative_dataset(jets_ctrl, path, da)
+create_jet_relative_dataset(jets_ctrl, path, da, suffix="_meters")
 del da
 
 da = open_da("Henrik_data", run, "t_low", "6H", *args, levels=100000)
 da = compute(da)
-create_jet_relative_dataset(jets_ctrl, path, da)
+create_jet_relative_dataset(jets_ctrl, path, da, suffix="_meters")
 del da
 
 da = open_da("Henrik_data", run, "z", "6H", *args)
 da = compute(da)
-create_jet_relative_dataset(jets_ctrl, path, da)
+create_jet_relative_dataset(jets_ctrl, path, da, suffix="_meters")
 del da
 
 
@@ -106,25 +124,25 @@ path = exp.path
 
 da = open_da("Henrik_data", run, ("high_wind", "PTTEND"), "6H", *args, levels=30000)
 da = compute(da)
-create_jet_relative_dataset(jets_dobl, path, da)
+create_jet_relative_dataset(jets_dobl, path, da, suffix="_meters")
 del da
 
 da = open_da("Henrik_data", run, ("high_wind", "DTCOND"), "6H", *args, levels=30000)
 da = compute(da)
-create_jet_relative_dataset(jets_dobl, path, da)
+create_jet_relative_dataset(jets_dobl, path, da, suffix="_meters")
 del da
 
 da = open_da("Henrik_data", run, ("high_wind", "theta"), "6H", *args, levels=30000)
 da = compute(da)
-create_jet_relative_dataset(jets_dobl, path, da)
+create_jet_relative_dataset(jets_dobl, path, da, suffix="_meters")
 del da
 
 da = open_da("Henrik_data", run, "t_low", "6H", *args, levels=100000)
 da = compute(da)
-create_jet_relative_dataset(jets_dobl, path, da)
+create_jet_relative_dataset(jets_dobl, path, da, suffix="_meters")
 del da
 
 da = open_da("Henrik_data", run, "z", "6H", *args)
 da = compute(da)
-create_jet_relative_dataset(jets_dobl, path, da)
+create_jet_relative_dataset(jets_dobl, path, da, suffix="_meters")
 del da

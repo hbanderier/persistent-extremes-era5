@@ -1,35 +1,30 @@
 import datetime
-import polars as pl
+import numpy as np
 import xarray as xr
-from jetutils.definitions import compute
+import polars as pl
+from jetutils.definitions import compute, RADIUS, degcos
 from jetutils.data import DataHandler, open_da
 from jetutils.anyspell import make_daily
 from jetutils.geospatial import create_jet_relative_dataset
-from jetutils.jet_finding import JetFindingExperiment, average_jet_categories, track_jets, spells_from_cross_catd
+from jetutils.jet_finding import JetFindingExperiment, average_jet_categories, track_jets, spells_from_cross_catd, pers_from_cross_catd
 
-ALL_TIMES = (
-    pl.datetime_range(
-        start=pl.datetime(1959, 1, 1),
-        end=pl.datetime(2023, 1, 1),
-        closed="left",
-        interval="6h",
-        eager=True,
-        time_unit="ms",
-    )
-    .rename("time")
-    .to_frame()
-)
-summer_filter = (
-    ALL_TIMES
-    .filter(pl.col("time").dt.month().is_in([6, 7, 8, 9]))
-    .filter(pl.col("time").dt.ordinal_day() > 166)
-)
-summer = summer_filter["time"]
-summer_daily = summer.filter(summer.dt.hour() == 0)
-big_summer = ALL_TIMES.filter(pl.col("time").dt.month().is_in([6, 7, 8, 9]))
-big_summer_daily = big_summer.filter(big_summer["time"].dt.hour() == 0)
 
-summer_doy = summer_daily.dt.ordinal_day().unique()
+def compute_emf_2d_conv(ds):
+    lon, lat = ds["lon"].values, ds["lat"].values
+    xlon, ylat = np.meshgrid(lon, lat)
+
+    _, dlonx = np.gradient(xlon)
+    dlaty, _ = np.gradient(ylat)
+
+    dx = RADIUS * np.radians(dlaty) * degcos(ylat)
+    dy = RADIUS * np.radians(dlaty)
+    
+    e1 = 0.5 * (ds["vp"] ** 2 - ds["up"] ** 2)
+    e2 = - ds["up"] * ds["vp"]
+    de1dx = ds["up"].copy(data=np.gradient(e1, axis=2)) / dx[None, :, :]
+    de2dy = ds["up"].copy(data=np.gradient(e2, axis=1)) / dy[None, :, :]
+    return de1dx + de2dy
+
 
 all_times = (
     pl.datetime_range(
@@ -58,8 +53,8 @@ exp = JetFindingExperiment(dh)
 ds = exp.ds
 all_jets_one_df = exp.find_jets(force=False, base_s_thresh=0.55, hole_size=6)
 all_jets_one_df = exp.categorize_jets(None, ["s", "theta"], force=False, n_init=10, init_params="k-means++", mode="week").cast({"time": pl.Datetime("ms")})
-
 props_uncat = exp.props_as_df(False).cast({"time": pl.Datetime("ms")})
+
 props_as_df = average_jet_categories(props_uncat, polar_cutoff=0.5)
 
 props_summer = summer_filter.join(props_as_df, on="time")
@@ -74,73 +69,62 @@ phat_props_catd = phat_props_catd.join(phat_props_catd.rolling("time", period="2
 
 phat_props_catd_summer = summer_filter.join(phat_props_catd, on="time")
 
-# cross_catd_ofile = exp.path.joinpath("cross_catd.parquet")
-# if cross_catd_ofile.is_file():
-#     cross_catd = pl.read_parquet(cross_catd_ofile)
-# else:
-#     cross_catd = track_jets(phat_jets_catd)
-#     cross_catd.write_parquet(cross_catd_ofile)
-
-# spells_list = spells_from_cross_catd(cross_catd, season=summer, base_q=0.6, n_STJ=30, n_EDJ=30, minlen=datetime.timedelta(days=5), smooth=datetime.timedelta(hours=24), fill_holes=datetime.timedelta(hours=18))
-
-# daily_spells_list = {a: make_daily(b, "spell", ["len", "spell_of"]) for a, b in spells_list.items()}
-
 args = ["all", None, -100, 60, 0, 90]
 
-da_T = open_da("ERA5", "surf", "t2m", "dailymean", *args)
-da_T = compute(da_T)
-create_jet_relative_dataset(phat_jets_catd, exp.path, da_T, suffix="_phat_catd")
-del da_T
+# da_T = open_da("ERA5", "surf", "t2m", "dailymean", *args)
+# da_T = compute(da_T)
+# create_jet_relative_dataset(phat_jets_catd, exp.path, da_T, suffix="meters")
+# del da_T
 
-da_tp = open_da("ERA5", "surf", "tp", "dailysum", *args)
-da_tp = compute(da_tp)
-create_jet_relative_dataset(phat_jets_catd, exp.path, da_tp, suffix="_phat_catd")
-del da_tp
+# da_tp = open_da("ERA5", "surf", "tp", "dailysum", *args)
+# da_tp = compute(da_tp)
+# create_jet_relative_dataset(phat_jets_catd, exp.path, da_tp, suffix="meters")
+# del da_tp
 
-da_pv = open_da("ERA5", "thetalev", "PV330", "dailymean", *args)
-da_pv = compute(da_pv).rename("PV330")
-create_jet_relative_dataset(phat_jets_catd, exp.path, da_pv, suffix="_phat_catd")
-del da_pv
+# da_pv = open_da("ERA5", "thetalev", "PV330", "dailymean", *args)
+# da_pv = compute(da_pv).rename("PV330")
+# create_jet_relative_dataset(phat_jets_catd, exp.path, da_pv, suffix="meters")
+# del da_pv
 
-da_pv = open_da("ERA5", "thetalev", "PV350", "dailymean", *args)
-da_pv = compute(da_pv)
-create_jet_relative_dataset(phat_jets_catd, exp.path, da_pv, suffix="_phat_catd")
-del da_pv
+# da_pv = open_da("ERA5", "thetalev", "PV350", "dailymean", *args)
+# da_pv = compute(da_pv)
+# create_jet_relative_dataset(phat_jets_catd, exp.path, da_pv, suffix="meters")
+# del da_pv
 
-varnames_rwb = ["APVO", "CPVO"]
-for var in varnames_rwb:
-    da_rwb = open_da("ERA5", "thetalev", var, "dailyany", *args)
-    da_rwb = compute(da_rwb)
-    create_jet_relative_dataset(phat_jets_catd, exp.path, da_rwb, suffix="_phat_catd")
-    del da_rwb
+# varnames_rwb = ["APVO", "CPVO"]
+# for var in varnames_rwb:
+#     da_rwb = open_da("ERA5", "thetalev", var, "dailyany", *args)
+#     da_rwb = compute(da_rwb)
+#     create_jet_relative_dataset(phat_jets_catd, exp.path, da_rwb, suffix="meters")
+#     del da_rwb
 
-da_theta2pvu = open_da("ERA5", "surf", "alot2pvu", "dailymean", *args)
-da_theta2pvu = compute(da_theta2pvu)
-create_jet_relative_dataset(phat_jets_catd, exp.path, da_theta2pvu, suffix="_phat_catd")
-del da_theta2pvu
+# da_theta2pvu = open_da("ERA5", "surf", ("alot2pvu", "theta"), "dailymean", *args)
+# da_theta2pvu = compute(da_theta2pvu)
+# create_jet_relative_dataset(phat_jets_catd, exp.path, da_theta2pvu, suffix="meters")
+# del da_theta2pvu
 
-ds = xr.open_zarr("/storage/workspaces/giub_meteo_impacts/ci01/ERA5/plev/uv/6H/results/Eddy_uv_natl_6days.zarr")
+ds = xr.open_zarr("/storage/workspaces/giub_meteo_impacts/ci01/ERA5/plev/uv/6H/results/Eddy_uv_natl_10days.zarr")
 
-EKE = ds["EKE"].sel(lev=250).rename("EKE250")
-EKE = EKE.resample(time="1d").mean()
-EKE = compute(EKE, progress_flag=True)
-create_jet_relative_dataset(phat_jets_catd, exp.path, EKE, suffix="_phat_catd")
-del EKE
-
-EMF = ds["EMF"].sel(lev=250).rename("EMF250")
-EMF = compute(EMF, progress_flag=True)
-EMF = EMF.resample(time="1d").mean()
-create_jet_relative_dataset(phat_jets_catd, exp.path, EMF, suffix="_phat_catd")
-del EMF
-
-up = ds["up"].sel(lev=250).rename("up250")
-up = up.resample(time="1d").mean()
-up = compute(up, progress_flag=True)
-create_jet_relative_dataset(phat_jets_catd, exp.path, up, suffix="_phat_catd")
-del up
+# up = ds["up"].sel(lev=250).rename("up250")
+# up = up.resample(time="1d").mean()
+# up = compute(up, progress_flag=True)
+# create_jet_relative_dataset(phat_jets_catd, exp.path, up, suffix="meters")
+# del up
 
 vp = ds["vp"].sel(lev=250).rename("vp250")
 vp = compute(vp, progress_flag=True)
 vp = vp.resample(time="1d").mean()
-create_jet_relative_dataset(phat_jets_catd, exp.path, vp, suffix="_phat_catd")
+create_jet_relative_dataset(phat_jets_catd, exp.path, vp, suffix="meters")
 del vp
+
+EMFconv = compute_emf_2d_conv(ds.sel(lev=250)).rename("EMFconv250")
+EMFconv = compute(EMFconv, progress_flag=True)
+EMFconv = EMFconv.resample(time="1d").mean()
+create_jet_relative_dataset(phat_jets_catd, exp.path, EMFconv, suffix="meters")
+del EMFconv
+
+EKE = (ds.sel(lev=250)["up"] ** 2 + ds.sel(lev=250)["vp"] ** 2) * 0.5
+EKE = compute(EKE, progress_flag=True).rename("EKE250")
+EKE = EKE.resample(time="1d").mean()
+create_jet_relative_dataset(phat_jets_catd, exp.path, EKE, suffix="meters")
+del EKE

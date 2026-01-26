@@ -6,8 +6,8 @@
 #SBATCH --job-name="exp_8"
 #SBATCH --time=09:00:00
 #SBATCH --partition="epyc2"
-#SBATCH --mem-per-cpu=15G
+#SBATCH --mem-per-cpu=30G
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=10
+#SBATCH --cpus-per-task=5
 
 srun uv run do_exp_8.py 
