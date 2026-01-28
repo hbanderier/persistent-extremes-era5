@@ -16,7 +16,7 @@ def compute_emf_2d_conv(ds):
     _, dlonx = np.gradient(xlon)
     dlaty, _ = np.gradient(ylat)
 
-    dx = RADIUS * np.radians(dlaty) * degcos(ylat)
+    dx = RADIUS * np.radians(dlonx) * degcos(ylat)
     dy = RADIUS * np.radians(dlaty)
     
     e1 = 0.5 * (ds["vp"] ** 2 - ds["up"] ** 2)
@@ -111,11 +111,11 @@ ds = xr.open_zarr("/storage/workspaces/giub_meteo_impacts/ci01/ERA5/plev/uv/6H/r
 # create_jet_relative_dataset(phat_jets_catd, exp.path, up, suffix="meters")
 # del up
 
-vp = ds["vp"].sel(lev=250).rename("vp250")
-vp = compute(vp, progress_flag=True)
-vp = vp.resample(time="1d").mean()
-create_jet_relative_dataset(phat_jets_catd, exp.path, vp, suffix="meters")
-del vp
+# vp = ds["vp"].sel(lev=250).rename("vp250")
+# vp = compute(vp, progress_flag=True)
+# vp = vp.resample(time="1d").mean()
+# create_jet_relative_dataset(phat_jets_catd, exp.path, vp, suffix="meters")
+# del vp
 
 EMFconv = compute_emf_2d_conv(ds.sel(lev=250)).rename("EMFconv250")
 EMFconv = compute(EMFconv, progress_flag=True)
@@ -123,8 +123,10 @@ EMFconv = EMFconv.resample(time="1d").mean()
 create_jet_relative_dataset(phat_jets_catd, exp.path, EMFconv, suffix="meters")
 del EMFconv
 
-EKE = (ds.sel(lev=250)["up"] ** 2 + ds.sel(lev=250)["vp"] ** 2) * 0.5
-EKE = compute(EKE, progress_flag=True).rename("EKE250")
-EKE = EKE.resample(time="1d").mean()
-create_jet_relative_dataset(phat_jets_catd, exp.path, EKE, suffix="meters")
-del EKE
+# EKE = (ds.sel(lev=250)["up"] ** 2 + ds.sel(lev=250)["vp"] ** 2) * 0.5
+# EKE = compute(EKE, progress_flag=True).rename("EKE250")
+# EKE = EKE.resample(time="1d").mean()
+# create_jet_relative_dataset(phat_jets_catd, exp.path, EKE, suffix="meters")
+# del EKE
+
+u = ex
