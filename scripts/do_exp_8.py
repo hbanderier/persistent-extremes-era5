@@ -1,30 +1,11 @@
-import datetime
 import numpy as np
 import xarray as xr
 import polars as pl
-from jetutils.definitions import compute, RADIUS, degcos
+from jetutils.definitions import compute
 from jetutils.data import DataHandler, open_da
-from jetutils.anyspell import make_daily
 from jetutils.geospatial import create_jet_relative_dataset
-from jetutils.jet_finding import JetFindingExperiment, average_jet_categories, track_jets, spells_from_cross_catd, pers_from_cross_catd
-
-
-def compute_emf_2d_conv(ds):
-    lon, lat = ds["lon"].values, ds["lat"].values
-    xlon, ylat = np.meshgrid(lon, lat)
-
-    _, dlonx = np.gradient(xlon)
-    dlaty, _ = np.gradient(ylat)
-
-    dx = RADIUS * np.radians(dlonx) * degcos(ylat)
-    dy = RADIUS * np.radians(dlaty)
-    
-    e1 = 0.5 * (ds["vp"] ** 2 - ds["up"] ** 2)
-    e2 = - ds["up"] * ds["vp"]
-    de1dx = ds["up"].copy(data=np.gradient(e1, axis=2)) / dx[None, :, :]
-    de2dy = ds["up"].copy(data=np.gradient(e2, axis=1)) / dy[None, :, :]
-    return de1dx + de2dy
-
+from jetutils.jet_finding import JetFindingExperiment, average_jet_categories
+from jetutils.derived_quantities import compute_emf_2d_conv, compute_relative_vorticity
 
 all_times = (
     pl.datetime_range(
@@ -50,8 +31,7 @@ big_summer_daily = big_summer.filter(big_summer["time"].dt.hour() == 0)
 
 dh = DataHandler("/storage/workspaces/giub_meteo_impacts/ci01/ERA5/plev/high_wind/6H/results/8")
 exp = JetFindingExperiment(dh)
-ds = exp.ds
-all_jets_one_df = exp.find_jets(force=False, base_s_thresh=0.55, hole_size=6)
+all_jets_one_df = exp.find_jets(force=False, base_s_thresh=0.55, hole_size=6, n_coarsen=2, smooth_s=5)
 all_jets_one_df = exp.categorize_jets(None, ["s", "theta"], force=False, n_init=10, init_params="k-means++", mode="week").cast({"time": pl.Datetime("ms")})
 props_uncat = exp.props_as_df(False).cast({"time": pl.Datetime("ms")})
 
@@ -70,7 +50,6 @@ phat_props_catd = phat_props_catd.join(phat_props_catd.rolling("time", period="2
 phat_props_catd_summer = summer_filter.join(phat_props_catd, on="time")
 
 args = ["all", None, -100, 60, 0, 90]
-
 # da_T = open_da("ERA5", "surf", "t2m", "dailymean", *args)
 # da_T = compute(da_T)
 # create_jet_relative_dataset(phat_jets_catd, exp.path, da_T, suffix="meters")
@@ -106,7 +85,7 @@ args = ["all", None, -100, 60, 0, 90]
 ds = xr.open_zarr("/storage/workspaces/giub_meteo_impacts/ci01/ERA5/plev/uv/6H/results/Eddy_uv_natl_10days.zarr")
 
 # up = ds["up"].sel(lev=250).rename("up250")
-# up = up.resample(time="1d").mean()
+# up = up.resample(time="1d").mean().astype(np.float32)
 # up = compute(up, progress_flag=True)
 # create_jet_relative_dataset(phat_jets_catd, exp.path, up, suffix="meters")
 # del up
@@ -117,16 +96,42 @@ ds = xr.open_zarr("/storage/workspaces/giub_meteo_impacts/ci01/ERA5/plev/uv/6H/r
 # create_jet_relative_dataset(phat_jets_catd, exp.path, vp, suffix="meters")
 # del vp
 
-EMFconv = compute_emf_2d_conv(ds.sel(lev=250)).rename("EMFconv250")
+EMFconv = compute_emf_2d_conv(ds.sel(lev=250)).rename("EMFconv250").astype(np.float32)
 EMFconv = compute(EMFconv, progress_flag=True)
-EMFconv = EMFconv.resample(time="1d").mean()
+EMFconv = EMFconv.resample(time="1d").mean().astype(np.float32)
 create_jet_relative_dataset(phat_jets_catd, exp.path, EMFconv, suffix="meters")
 del EMFconv
 
-# EKE = (ds.sel(lev=250)["up"] ** 2 + ds.sel(lev=250)["vp"] ** 2) * 0.5
-# EKE = compute(EKE, progress_flag=True).rename("EKE250")
-# EKE = EKE.resample(time="1d").mean()
-# create_jet_relative_dataset(phat_jets_catd, exp.path, EKE, suffix="meters")
-# del EKE
+EKE = (ds.sel(lev=250)["up"] ** 2 + ds.sel(lev=250)["vp"] ** 2) * 0.5
+EKE = compute(EKE, progress_flag=True).rename("EKE250")
+EKE = EKE.resample(time="1d").mean().astype(np.float32)
+create_jet_relative_dataset(phat_jets_catd, exp.path, EKE, suffix="meters")
+del EKE
+del ds
 
-u = ex
+ds = exp.ds
+
+u = ds["u"]
+u = compute(u, progress_flag=True)
+u = u.resample(time="1d").mean().astype(np.float32)
+create_jet_relative_dataset(phat_jets_catd, exp.path, u, suffix="meters")
+del u
+
+v = ds["v"]
+v = compute(v, progress_flag=True)
+v = v.resample(time="1d").mean().astype(np.float32)
+create_jet_relative_dataset(phat_jets_catd, exp.path, v, suffix="meters")
+del v
+
+s = ds["s"]
+s = compute(s, progress_flag=True)
+s = s.resample(time="1d").mean().astype(np.float32)
+create_jet_relative_dataset(phat_jets_catd, exp.path, s, suffix="meters")
+del s
+
+vort = compute_relative_vorticity(ds).rename("vort").astype(np.float32)
+vort = compute(vort, progress_flag=True)
+vort = vort.resample(time="1d").mean().astype(np.float32)
+create_jet_relative_dataset(phat_jets_catd, exp.path, vort, suffix="meters")
+del vort
+del ds
