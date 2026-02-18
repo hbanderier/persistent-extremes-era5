@@ -1,12 +1,13 @@
-from jetutils.definitions import *
-from jetutils.data import *
-from jetutils.jet_finding import *
-from jetutils.anyspell import *
-from jetutils.plots import *
-from jetutils.geospatial import *
+from tqdm import tqdm
+import polars as pl
+from jetutils.definitions import YEARS, iterate_over_year_maybe_member, compute
+from jetutils.data import DataHandler
+from jetutils.jet_finding import JetFindingExperiment, gather_normal_da_jets, open_da, add_feature_for_cat, average_jet_categories
+from jetutils.geospatial import interp_jets_to_zero_one
+from jetutils.derived_quantities import compute_relative_vorticity
 
 
-def create_jet_relative_dataset(jets, path, da, suffix="", half_length: float = 2e6, dn: float = 5e4, n_interp: int = 40, in_meters: bool = True):
+def create_jet_relative_dataset(jets, path, da, suffix="", half_length: float = 2e6, dn: float = 1e5, n_interp: int = 30, in_meters: bool = True):
     indexer = iterate_over_year_maybe_member(jets, da)
     to_average = []
     varname = da.name + "_interp"
@@ -85,6 +86,15 @@ da = compute(da)
 create_jet_relative_dataset(jets_ctrl, path, da, suffix="_meters")
 del da
 
+da = compute_relative_vorticity(exp.ds).rename("vort")
+da = compute(da)
+create_jet_relative_dataset(jets_ctrl, path, da, suffix="_meters")
+del da
+
+da = exp.ds["s"].rename("s")
+da = compute(da)
+create_jet_relative_dataset(jets_ctrl, path, da, suffix="_meters")
+del da
 
 run = "dobl"
 
@@ -145,4 +155,14 @@ del da
 da = open_da("Henrik_data", run, "z", "6H", *args)
 da = compute(da)
 create_jet_relative_dataset(jets_dobl, path, da, suffix="_meters")
+del da
+
+da = compute_relative_vorticity(exp.ds).rename("vort")
+da = compute(da)
+create_jet_relative_dataset(jets_ctrl, path, da, suffix="_meters")
+del da
+
+da = exp.ds["s"].rename("s")
+da = compute(da)
+create_jet_relative_dataset(jets_ctrl, path, da, suffix="_meters")
 del da

@@ -34,6 +34,7 @@ dependencies = [
     "sdfc",
     "seaborn>=0.13.2",
     "simpsom-dask",
+    "sshfs>=2025.11.0",
     "tqdm>=4.67.1",
     "wavebreaking>=0.3.8",
     "xarray>=2025.10.1",

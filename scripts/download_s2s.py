@@ -6,7 +6,7 @@ from pathlib import Path
 from jetutils.definitions import DATADIR
 server = ECMWFDataServer()
 
-first_date = (7, 1)
+first_date = (5, 1)
 last_date = (8, 31)
 def date_string(year: int, month: int, day: int):
     year = str(year).zfill(4)
@@ -31,7 +31,7 @@ def hdates_from_date(date: str):
     years = range(2005, 2025)
     return "/".join([f"{year}-{month}-{day}" for year in years])
 
-basepath = Path(DATADIR, "S2S", "surf", "mslp_fct", "daily")
+basepath = Path(DATADIR, "S2S", "plev", "wind", "daily")
 
 for date in dates:
     hdates = hdates_from_date(date)
@@ -46,11 +46,12 @@ for date in dates:
         "date": date,
         "expver": "prod",
         "hdate": hdates,
-        "levtype": "sfc",
+        "levtype": "pl",
+        "levellist": "200/300",
         "model": "glob",
         "number": "1/2/3/4/5/6/7/8/9/10",
         "origin": "ecmf",
-        "param": "151",
+        "param": "131/132",
         "step": "0/24/48/72/96/120/144/168/192/216/240/264/288/312/336/360/384/408/432/456/480/504/528/552/576/600/624/648/672/696/720/744/768/792/816/840/864/888/912/936/960/984/1008/1032/1056/1080/1104",
         "stream": "enfh",
         "time": "00:00:00",

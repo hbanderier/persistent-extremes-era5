@@ -8,7 +8,7 @@ basepath.mkdir(parents=True, exist_ok=True)
 suffix = ""
 suffix = f"_{suffix}" if suffix != "" else ""
 
-def retrieve(client: Client, request: dict, year: int, month: int = None):
+def retrieve(client: Client, request: dict, year: int, month: int | None = None):
     year = str(year).zfill(4)
     if month is not None:
         month = str(month).zfill(2)
