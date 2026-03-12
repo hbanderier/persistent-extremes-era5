@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name="henrik_jets"
 #SBATCH --nodes=1
-#SBATCH --time=12:00:00
+#SBATCH --time=04:00:00
 #SBATCH --partition="epyc2"
 #SBATCH --mem=100G
 #SBATCH --cpus-per-task=5

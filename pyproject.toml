@@ -27,6 +27,7 @@ dependencies = [
     "numpy>=2.3.3",
     "polars==1.36.1",
     "polars-ds>=0.10.2",
+    "polars-st>=0.4.3",
     "pyarrow>=21.0.0",
     "rustworkx>=0.17.1",
     "scikit-learn>=1.7.2",
