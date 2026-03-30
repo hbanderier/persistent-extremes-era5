@@ -10,5 +10,5 @@ echo "Jupyter lab will be started on $(hostname) and establish port farwarding f
 
 ssh -N -R ${port}:localhost:${port} $SLURM_SUBMIT_HOST &
 
-XDG_RUNTIME_DIR="" uv run --with jupyter jupyter lab --NotebookApp.ip='0.0.0.0' --port ${port} --no-browser ${@:2}
+XDG_RUNTIME_DIR="" uv run --with jupyter jupyter lab --ServerApp.ip='0.0.0.0' --port ${port} --no-browser ${@:2}
 
