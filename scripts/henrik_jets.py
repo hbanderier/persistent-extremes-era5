@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from itertools import product
 
 import dask.array as darr
 import numpy as np
@@ -15,6 +16,7 @@ from jetutils.geospatial import (
     detect_overturnings,
     event_props,
     to_xarray_sjoin,
+    detect_streamers,
 )
 from jetutils.jet_finding import (
     DataHandler,
@@ -385,6 +387,78 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
             da = da.any("level").resample(time="1D").any().astype(np.uint8)
             da.to_netcdf(odir.joinpath(f"{year}.nc"))
             
+# block 4.5: Streamers
+levels = compute(xr.open_mfdataset(list(Path(DATADIR, "Henrik_data/ctrl/zeta/6H").glob("*0.nc")))["__xarray_dataarray_variable__"].quantile([0.5]), progress_flag=True).values
+levels = (levels * 1e5).round(1).tolist()
+
+filters_type = {
+    "stratospheric": pl.col("zeta") >= pl.col("level"),
+    "tropospheric": pl.col("zeta") < pl.col("level")
+}
+filters_orientation = {
+    "anticyclonic": pl.col("mflux") <= 0.,
+    "cyclonic": pl.col("mflux") > 0.
+}
+for run in ["ctrl", "dobl", "ctrl_p4"]:
+    basepath_zeta = Path(DATADIR, f"Henrik_data/{run}/zeta/6H")
+    da_mflux = xr.open_dataset(
+        f"{DATADIR}/Henrik_data/{run}/high_wind/6H/results/Eddy_NH_10days.zarr"
+    ).sel(lev=30000)
+    da_mflux = (da_mflux["up"] * da_mflux["vp"]).rename("EMF")
+    opath = Path(DATADIR, "Henrik_data", run) 
+    opath_rwb = Path(DATADIR, f"Henrik_data/{run}/rwb_index")
+    opath_rwb.mkdir(exist_ok=True)
+    for year in trange(1969, 2021):
+        ofile = opath_rwb.joinpath(f"streamers_{year}.parquet")
+        
+        if opath.joinpath(f"TCAVS/6H/{year}.nc").is_file() and ofile.is_file():
+            continue
+            
+        zeta = xr.open_dataarray(basepath_zeta.joinpath(f"{year}.nc")).sel(lev=30000)
+        zeta = zeta.assign_coords(
+            lat=(0.7 + np.arange(len(zeta.lat), dtype=np.float32) * 0.94).round(2)
+        ).rename("zeta") * 1e5
+        for potential in ["lev", "loni", "lati"]:
+            try:
+                zeta = zeta.reset_coords(potential, drop=True)
+            except ValueError:
+                continue
+        mflux = da_mflux.sel(time=zeta.time)
+        mflux = mflux.assign_coords(
+            lat=(0.7 + np.arange(len(mflux.lat), dtype=np.float32) * 0.94).round(2)
+        ).rename("mflux").reset_coords("lev", drop=True)
+        zeta = smooth(zeta, {"lon": ("win", 3), "lat": ("win", 3)})
+        zeta = compute(zeta)
+        mflux = smooth(mflux, {"lon": ("win", 3), "lat": ("win", 3)})
+        mflux = compute(mflux)
+        if ofile.is_file():
+            streamers = pl.read_parquet(ofile)
+            streamers_on_grid = None
+        else:
+            contours = detect_contours(zeta, levels, processes=N_WORKERS, ctx="fork")
+            streamers = detect_streamers(contours)
+            streamers, streamers_on_grid = event_props(streamers, [zeta, mflux])
+            streamers.write_parquet(ofile)
+            
+        
+        for type_, orientation in product(["stratospheric", "tropospheric"], ["cyclonic", "anticyclonic"]):
+            name = f"{type_[0].upper()}{orientation[0].upper()}AVS"
+            odir = opath.joinpath(f"{name}/6H")
+            odir.mkdir(parents=True, exist_ok=True)
+            ofile = odir.joinpath(f"{year}.nc")
+            if ofile.is_file():
+                continue
+            f1 = filters_type[type_]
+            f2 = filters_orientation[orientation]
+            df = streamers.filter(f1, f2)
+            da = to_xarray_sjoin(zeta, events=df)
+            da.to_netcdf(ofile)
+            
+            odir = opath.joinpath(f"{name}/dailyany")
+            odir.mkdir(parents=True, exist_ok=True)
+            da = da.any("level").resample(time="1D").any().astype(np.uint8)
+            da.to_netcdf(odir.joinpath(f"{year}.nc"))
+            
 # block 5: define jets (already computed probably)
 
 both_jets = {}
@@ -415,6 +489,10 @@ to_do = (
     ("DTCOND500", ("heating", "DTCOND"), {}),
     ("AAVO", "AAVO", {}),
     ("CAVO", "CAVO", {}),
+    ("SAAVS", "SAAVS", {}),
+    ("SCAVS", "SCAVS", {}),
+    ("TAAVS", "TAAVS", {}),
+    ("TCAVS", "TCAVS", {}),
 )
 
 for run in ["ctrl", "dobl", "ctrl_p4"]:
