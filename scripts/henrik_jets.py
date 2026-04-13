@@ -8,7 +8,7 @@ import polars as pl
 import xarray as xr
 from jetutils.data import open_da, smooth
 from jetutils.definitions import DATADIR, YEARS, compute, N_WORKERS, DEFAULT_VARNAME, degsin, OMEGA, C_P_AIR, KAPPA
-from jetutils.derived_quantities import compute_absolute_vorticity
+from jetutils.derived_quantities import compute_absolute_vorticity, compute_2d_conv
 from jetutils.geospatial import (
     gather_normal_da_jets,
     interp_jets_to_zero_one,
@@ -289,46 +289,42 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
         f"{DATADIR}/Henrik_data/{run}/high_wind/6H/results",
         "Eddy_NH_10days.zarr",
     )
-    ofile = Path(f"/storage/workspaces/giub_meteo_impacts/ci01/Henrik_data/{run}/high_wind/6H/results/F300.zarr")
-    if ofile.is_dir():
-        continue
-    ds = xr.open_dataset(ipath).chunk("auto")
-    other = xr.open_mfdataset(f"{DATADIR}/Henrik_data/{run}/vertical/6H/*.nc")
-    ds = xr.merge([ds, other])
-    ds["u"] = xr.open_mfdataset(f"{DATADIR}/Henrik_data/{run}/high_wind/6H/*.nc")["u"].chunk("auto")
-    
-    ds = ds.sel(lev=30000)
-    
-    Gen_EP = {}
+    odir = Path(f"{DATADIR}/Henrik_data/{run}/EPF/6H")
+    odir.mkdir(parents=True, exist_ok=True)
+    bigds = xr.open_dataset(ipath).sel(lev=[20000, 30000]).chunk("auto")
+    for year in trange(1969, 2021):
+        ofile = odir.joinpath(f"{year}.nc")
+        if ofile.is_file():
+            continue
+        ds = bigds.sel(time=bigds.time.dt.year == year)
+        other = xr.open_dataset(f"{DATADIR}/Henrik_data/{run}/vertical/6H/{year}.nc").sel(lat=slice(0, None))
+        ds = xr.merge([ds, other])
+        ds["u"] = xr.open_dataset(f"{DATADIR}/Henrik_data/{run}/high_wind/6H/{year}.nc")["u"].sel(lat=slice(0, None))
+        
+        gamma = (-KAPPA / ds.lev * (100000 / ds.lev) ** KAPPA * ds["dthetadp"].mean(["time", "lon", "lat"])).astype(np.float32)
+        EAPE = (C_P_AIR * 0.5 * (ds.lev * 1e-5) ** (2 * KAPPA) * gamma * ds["thetap"] ** 2).astype(np.float32)
+        S = (0.5 * (ds["up"] ** 2 + ds["vp"] ** 2 - EAPE)).astype(np.float32)
+        f = (2 * OMEGA * degsin(ds.lat)).astype(np.float32)
 
-    gamma = (-KAPPA / ds.lev * (100000 / ds.lev) ** KAPPA * ds["dthetadp"].mean(["time", "lon", "lat"])).astype(np.float32)
-    EAPE = (C_P_AIR * 0.5 * (ds.lev * 1e-5) ** (2 * KAPPA) * gamma * ds["thetap"] ** 2).astype(np.float32)
-    S = (0.5 * (ds["up"] ** 2 + ds["vp"] ** 2 - EAPE)).astype(np.float32)
-    f = (2 * OMEGA * degsin(ds.lat)).astype(np.float32)
+        ## Base 2 * 3
+        ds["F11"] = ds["up"] ** 2 - S
+        ds["F12"] = ds["up"] * ds["vp"]
+        ds["F13"] = - ds["vp"] * ds["thetap"] * f / ds["dthetadp"]
+        ds["F21"] = ds["up"] * ds["vp"]
+        ds["F22"] = ds["vp"] ** 2 - S
+        ds["F23"] = ds["up"] * ds["thetap"] * f / ds["dthetadp"]
 
-    ## Base 2 * 3
-    Gen_EP["F11"] = ds["up"] ** 2 - S
-    Gen_EP["F12"] = ds["up"] * ds["vp"]
-    Gen_EP["F13"] = ds["up"] * ds["omegap"] - ds["vp"] * ds["thetap"] * f / ds["dthetadp"]
-    Gen_EP["F21"] = ds["up"] * ds["vp"]
-    Gen_EP["F22"] = ds["vp"] ** 2 - S
-    Gen_EP["F23"] = ds["vp"] * ds["omegap"] + ds["up"] * ds["thetap"] * f / ds["dthetadp"]
-
-    ## Additional from original EP:
-    Gen_EP["F12_extra"] = - ds["dudp"] * ds["vp"] * ds["thetap"] / ds["dthetadp"]
-    # Gen_EP["F13_extra"] = (ds["u"] * degcos(ds.lat)).differentiate("lat") * ds["vp"] * ds["thetap"] / ds["dthetadp"] / RADIUS / degcos(ds.lat)
-
-    # ## Additional from Plumb 85:
-    # Gen_EP["F11_extra_"] = -(ds["vp"] * ds["phip"]).differentiate("lon") / f / RADIUS / degcos(ds.lat)
-    # Gen_EP["F12_extra_"] = -(ds["up"] * ds["phip"]).differentiate("lon") / f / RADIUS / degcos(ds.lat)
-    # Gen_EP["F13_extra_"] = -(ds["thetap"] * ds["phip"]).differentiate("lon") / RADIUS / degcos(ds.lat) / ds["dthetadp"]
-    Gen_EP = xr.Dataset(Gen_EP).chunk({"time": 1390, "lat": 72, "lon": 161})
-    res = Gen_EP.to_zarr(ofile, compute=False)
-    compute(res, progress=True)
+        ## Additional from original EP:
+        ds["F12_extra"] = - ds["dudp"] * ds["vp"] * ds["thetap"] / ds["dthetadp"]
+        ds["F13_extra"] = ds["up"] * ds["omegap"]
+        ds["F23_extra"] = ds["vp"] * ds["omegap"]
+        ds = ds.drop_vars([var for var in list(ds.data_vars) if var[0] != "F"])
+        ds = compute(ds, progress_flag=False)
+        ds.to_netcdf(ofile)
     
 
 # block 4: WB
-levels = compute(xr.open_mfdataset(list(Path(DATADIR, "Henrik_data/ctrl/zeta/6H").glob("*0.nc")))["__xarray_dataarray_variable__"].quantile([0.5]), progress_flag=True).values
+levels = compute(xr.open_mfdataset(list(Path(DATADIR, "Henrik_data/ctrl/zeta/6H").glob("*0.nc")))[DEFAULT_VARNAME].quantile([0.5]), progress_flag=True).values
 levels = (levels * 1e5).round(1).tolist()
 for run in ["ctrl", "dobl", "ctrl_p4"]:
     basepath_zeta = Path(DATADIR, f"Henrik_data/{run}/zeta/6H")
@@ -346,28 +342,24 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
             continue
             
         zeta = xr.open_dataarray(basepath_zeta.joinpath(f"{year}.nc")).sel(lev=30000)
-        zeta = zeta.assign_coords(
-            lat=(0.7 + np.arange(len(zeta.lat), dtype=np.float32) * 0.94).round(2)
-        ).rename("zeta") * 1e5
+        zeta = zeta.rename("zeta") * 1e5
         for potential in ["lev", "loni", "lati"]:
             try:
                 zeta = zeta.reset_coords(potential, drop=True)
             except ValueError:
                 continue
         mflux = da_mflux.sel(time=zeta.time)
-        mflux = mflux.assign_coords(
-            lat=(0.7 + np.arange(len(mflux.lat), dtype=np.float32) * 0.94).round(2)
-        ).rename("mflux").reset_coords("lev", drop=True)
-        zeta = smooth(zeta, {"lon": ("win", 3), "lat": ("win", 3)})
+        mflux = mflux.rename("mflux").reset_coords("lev", drop=True)
+        zeta = smooth(zeta, {"lon": ("win", 5), "lat": ("win", 5)})
         zeta = compute(zeta)
-        mflux = smooth(mflux, {"lon": ("win", 3), "lat": ("win", 3)})
+        # mflux = smooth(mflux, {"lon": ("win", 5), "lat": ("win", 5)})
         mflux = compute(mflux)
         if ofile.is_file():
             overturnings = pl.read_parquet(ofile)
             overturnings_on_grid = None
         else:
             contours = detect_contours(zeta, levels, processes=N_WORKERS, ctx="fork")
-            overturnings = detect_overturnings(contours)
+            overturnings = detect_overturnings(contours, max_difflon=3)
             overturnings, overturnings_on_grid = event_props(overturnings, [zeta, mflux])
             overturnings.write_parquet(ofile)
             
@@ -388,8 +380,8 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
             da.to_netcdf(odir.joinpath(f"{year}.nc"))
             
 # block 4.5: Streamers
-levels = compute(xr.open_mfdataset(list(Path(DATADIR, "Henrik_data/ctrl/zeta/6H").glob("*0.nc")))["__xarray_dataarray_variable__"].quantile([0.5]), progress_flag=True).values
-levels = (levels * 1e5).round(1).tolist()
+# levels = compute(xr.open_mfdataset(list(Path(DATADIR, "Henrik_data/ctrl/zeta/6H").glob("*0.nc")))["__xarray_dataarray_variable__"].quantile([0.5]), progress_flag=True).values
+# levels = (levels * 1e5).round(1).tolist()
 
 filters_type = {
     "stratospheric": pl.col("zeta") >= pl.col("level"),
@@ -415,21 +407,17 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
             continue
             
         zeta = xr.open_dataarray(basepath_zeta.joinpath(f"{year}.nc")).sel(lev=30000)
-        zeta = zeta.assign_coords(
-            lat=(0.7 + np.arange(len(zeta.lat), dtype=np.float32) * 0.94).round(2)
-        ).rename("zeta") * 1e5
+        zeta = zeta.rename("zeta") * 1e5
         for potential in ["lev", "loni", "lati"]:
             try:
                 zeta = zeta.reset_coords(potential, drop=True)
             except ValueError:
                 continue
         mflux = da_mflux.sel(time=zeta.time)
-        mflux = mflux.assign_coords(
-            lat=(0.7 + np.arange(len(mflux.lat), dtype=np.float32) * 0.94).round(2)
-        ).rename("mflux").reset_coords("lev", drop=True)
-        zeta = smooth(zeta, {"lon": ("win", 3), "lat": ("win", 3)})
+        mflux = mflux.rename("mflux").reset_coords("lev", drop=True)
+        zeta = smooth(zeta, {"lon": ("win", 5), "lat": ("win", 5)})
         zeta = compute(zeta)
-        mflux = smooth(mflux, {"lon": ("win", 3), "lat": ("win", 3)})
+        # mflux = smooth(mflux, {"lon": ("win", 3), "lat": ("win", 3)})
         mflux = compute(mflux)
         if ofile.is_file():
             streamers = pl.read_parquet(ofile)
@@ -496,6 +484,7 @@ to_do = (
 )
 
 for run in ["ctrl", "dobl", "ctrl_p4"]:
+    jets = both_jets[run]
     for huh in to_do:
         rename, name, kwargs = huh
         ofile = both_paths[run].joinpath(f"{rename}_relative.parquet")
@@ -505,29 +494,44 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
         if rename in ["AAVO", "CAVO"] and "lev" in da_.dims:
             da_ = da_.isel(lev=2)
         da_ = compute(da_)
-        interpd = create_jet_relative_dataset(both_jets[run], da_)
+        interpd = create_jet_relative_dataset(jets, da_)
         del da_
         interpd.write_parquet(ofile)
-    Gen_EP = xr.open_dataset(f"/storage/workspaces/giub_meteo_impacts/ci01/Henrik_data/{run}/high_wind/6H/results/F300.zarr")
-    for data_var in Gen_EP.data_vars:
-        ofile = both_paths[run].joinpath(f"{data_var}_relative.parquet")
-        print(run, data_var, ofile)
-        if ofile.is_file():
-            continue
-        da_ = Gen_EP[data_var]
-        interpd = create_jet_relative_dataset(both_jets[run], da_)
-        del da_
-        interpd.write_parquet(ofile)
-    ofile_2x = Path(f"/storage/workspaces/giub_meteo_impacts/ci01/Henrik_data/{run}/high_wind/6H/results/F300_2x.zarr")
-    if not ofile_2x.is_dir():
-        continue
-    Gen_EP = xr.open_dataset(ofile_2x)
-    for data_var in Gen_EP.data_vars:
-        ofile = both_paths[run].joinpath(f"{data_var}_relative.parquet")
-        if ofile.is_file():
-            continue
-        da_ = Gen_EP[data_var]
-        interpd = create_jet_relative_dataset(both_jets[run], da_)
-        del da_
-        interpd.write_parquet(ofile)
-        
+    half_length = 2e6
+    dn = 1e5
+    n_interp = 30
+    mapping = {
+        f"F{j}": [f"F1{j}", f"F2{j}"]
+        for j in ["1", "2", "3", "3_extra"]
+    } | {
+        key: [f"{key}1", f"{key}2"]
+        for key in ["hor", "vert", "vert_extra"]
+    }
+    dfs = {key: [] for key in mapping}
+    for year in range(1969, 2021):
+        df = jets.filter(pl.col("time").dt.year() == year)
+        ds = xr.open_dataset(f"{DATADIR}/Henrik_data/ctrl/EPF/6H/{year}.nc")
+        ds["vert1"] = ds["F13"].differentiate("lev")
+        ds["vert2"] = ds["F23"].differentiate("lev")
+        ds["vert_extra1"] = ds["F13_extra"].differentiate("lev")
+        ds["vert_extra2"] = ds["F23_extra"].differentiate("lev")
+        ds = ds.sel(lev=30000)
+        ds["hor1"] = compute_2d_conv(ds, "F11", "F12")
+        ds["hor2"] = compute_2d_conv(ds, "F21", "F22")
+        for dest, sources in mapping.items():
+            varname = f"{dest}_interp"
+            df_interp = gather_normal_da_jets(
+                df, ds[sources[0]], ds[sources[1]], half_length=half_length, dn=dn, in_meters=True
+            )
+            agg = pl.col("angle").cos() * pl.col(f"{sources[0]}_interp") + pl.col("angle").sin() * pl.col(f"{sources[1]}_interp")
+            
+            df_interp = df_interp.with_columns(**{varname: agg}).drop(f"{sources[0]}_interp", f"{sources[1]}_interp")
+            
+            df_interp = interp_jets_to_zero_one(
+                df_interp, [varname, "is_polar"], n_interp=n_interp
+            )
+            dfs[dest].append(df_interp)
+    for key in mapping:
+        opath = both_paths[run].joinpath(f"{key}_relative.parquet")
+        pl.concat(dfs[key]).write_parquet(opath)
+            
