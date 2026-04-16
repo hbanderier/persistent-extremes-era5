@@ -497,6 +497,11 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
         interpd = create_jet_relative_dataset(jets, da_)
         del da_
         interpd.write_parquet(ofile)
+
+
+for run in ["ctrl", "dobl", "ctrl_p4"]:
+    jets = both_jets[run]    
+    opaths = {}
     half_length = 2e6
     dn = 1e5
     n_interp = 30
@@ -507,8 +512,13 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
         key: [f"{key}1", f"{key}2"]
         for key in ["hor", "vert", "vert_extra"]
     }
-    dfs = {key: [] for key in mapping}
-    for year in range(1969, 2021):
+    for key in mapping:
+        opaths[key] = both_paths[run].joinpath(f"{key}_relative.parquet")
+    if all([opath.is_file() for opath in opaths.values()]):
+        continue
+    tmp_folder = both_paths[run].joinpath("tmp_rel")
+    tmp_folder.mkdir(exist_ok=True)
+    for year in trange(1969, 2021):
         df = jets.filter(pl.col("time").dt.year() == year)
         ds = xr.open_dataset(f"{DATADIR}/Henrik_data/ctrl/EPF/6H/{year}.nc")
         ds["vert1"] = ds["F13"].differentiate("lev")
@@ -519,6 +529,9 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
         ds["hor1"] = compute_2d_conv(ds, "F11", "F12")
         ds["hor2"] = compute_2d_conv(ds, "F21", "F22")
         for dest, sources in mapping.items():
+            this_ofile = tmp_folder.joinpath(f"{dest}_{year}.parquet")
+            if this_ofile.is_file():
+                continue
             varname = f"{dest}_interp"
             df_interp = gather_normal_da_jets(
                 df, ds[sources[0]], ds[sources[1]], half_length=half_length, dn=dn, in_meters=True
@@ -530,8 +543,14 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
             df_interp = interp_jets_to_zero_one(
                 df_interp, [varname, "is_polar"], n_interp=n_interp
             )
-            dfs[dest].append(df_interp)
+            df_interp.write_parquet(this_ofile)
     for key in mapping:
-        opath = both_paths[run].joinpath(f"{key}_relative.parquet")
-        pl.concat(dfs[key]).write_parquet(opath)
+        opath = opaths[key]
+        df = []
+        for year in range(1969, 2021):
+            df.append(pl.read_parquet(tmp_folder.joinpath(f"{key}_{year}.parquet")))
+        pl.concat(df).write_parquet(opath)
+    for f in tmp_folder.iterdir():
+        f.unlink()
+    tmp_folder.rmdir()
             
