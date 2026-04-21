@@ -6,7 +6,7 @@ import dask.array as darr
 import numpy as np
 import polars as pl
 import xarray as xr
-from jetutils.data import open_da, smooth
+from jetutils.data import open_da, smooth, extract
 from jetutils.definitions import DATADIR, YEARS, compute, N_WORKERS, DEFAULT_VARNAME, degsin, OMEGA, C_P_AIR, KAPPA
 from jetutils.derived_quantities import compute_absolute_vorticity, compute_2d_conv
 from jetutils.geospatial import (
@@ -481,6 +481,7 @@ to_do = (
     ("SCAVS", "SCAVS", {}),
     ("TAAVS", "TAAVS", {}),
     ("TCAVS", "TCAVS", {}),
+    ("EKE300", "EKE", {}),
 )
 
 for run in ["ctrl", "dobl", "ctrl_p4"]:
@@ -490,13 +491,22 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
         ofile = both_paths[run].joinpath(f"{rename}_relative.parquet")
         if ofile.is_file():
             continue
-        da_ = open_da("Henrik_data", run, name, "6H", *args, **kwargs).rename(rename)
+        if name != "EKE":
+            da_ = open_da("Henrik_data", run, name, "6H", *args, **kwargs).rename(rename)
+        else:
+            ds = xr.open_dataset(
+                f"{DATADIR}/Henrik_data/{run}/high_wind/6H/results/Eddy_NH_10days.zarr"
+            ).sel(lev=30000)
+            ds = extract(ds, *args)
+            da_ = 0.5 * np.sqrt(ds["up"] ** 2 + ds["vp"] ** 2)
+            da_ = da_.rename(rename)
         if rename in ["AAVO", "CAVO"] and "lev" in da_.dims:
             da_ = da_.isel(lev=2)
         da_ = compute(da_)
         interpd = create_jet_relative_dataset(jets, da_)
         del da_
         interpd.write_parquet(ofile)
+    
 
 
 for run in ["ctrl", "dobl", "ctrl_p4"]:
@@ -521,6 +531,7 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
     for year in trange(1969, 2021):
         df = jets.filter(pl.col("time").dt.year() == year)
         ds = xr.open_dataset(f"{DATADIR}/Henrik_data/ctrl/EPF/6H/{year}.nc")
+        ds = extract(ds, *args)
         if not opaths["vert"].is_file():
             ds["vert1"] = ds["F13"].differentiate("lev")
             ds["vert2"] = ds["F23"].differentiate("lev")
