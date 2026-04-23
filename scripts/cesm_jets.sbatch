@@ -4,8 +4,8 @@
 #------------------------
 #SBATCH --qos="job_gratis"
 #SBATCH --job-name="cesm_jets"
-#SBATCH --time=03:00:00
-#SBATCH --mem=100G
+#SBATCH --time=10:00:00
+#SBATCH --mem=140G
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=6

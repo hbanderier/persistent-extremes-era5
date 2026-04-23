@@ -7,12 +7,13 @@ import numpy as np
 import polars as pl
 import xarray as xr
 from jetutils.data import open_da, smooth, extract
-from jetutils.definitions import DATADIR, YEARS, compute, N_WORKERS, DEFAULT_VARNAME, degsin, OMEGA, C_P_AIR, KAPPA
-from jetutils.derived_quantities import compute_absolute_vorticity, compute_2d_conv
+from jetutils.definitions import DATADIR, YEARS, N_WORKERS, DEFAULT_VARNAME, OMEGA, C_P_AIR, KAPPA, degsin, compute, get_index_columns, polars_to_xarray
+from jetutils.derived_quantities import compute_absolute_vorticity, compute_2d_conv, compute_norm_derivative
 from jetutils.geospatial import (
     gather_normal_da_jets,
     interp_jets_to_zero_one,
     detect_contours,
+    detect_contours_lonlat,
     detect_overturnings,
     event_props,
     to_xarray_sjoin,
@@ -186,30 +187,112 @@ def convolve(in1, in2, mode="full", method="fft", axes=None):
 def create_jet_relative_dataset(
     jets,
     da,
+    bias_correction: pl.DataFrame | None = None,
     half_length: float = 2e6,
     dn: float = 1e5,
     n_interp: int = 30,
     in_meters: bool = True,
 ):
-    indexer = iterate_over_year_maybe_member(jets, da)
+    indexer = list(iterate_over_year_maybe_member(jets, ds))
     to_average = []
+    index_columns = get_index_columns(
+        jets, 
+        (
+            "member",
+            "time",
+            "cluster",
+            "spell",
+            "relative_index",
+            "relative_time",
+            "sample_index",
+            "inside_index"
+        )
+    )
     varname = da.name + "_interp"
-    for idx1, idx2 in tqdm(indexer, total=len(YEARS)):
+    for idx1, idx2 in tqdm(indexer, total=len(indexer)):
         jets_ = jets.filter(*idx1)
         da_ = da.sel(**idx2)
+        if bias_correction is not None:
+            bias_correction_ = bias_correction.filter(*idx1)
+            extra_n = bias_correction["n_max"].abs().max()
+        else:
+            bias_correction_ = None
+            extra_n = 0
         try:
             jets_with_interp = gather_normal_da_jets(
-                jets_, da_, half_length=half_length, dn=dn, in_meters=in_meters
+                jets_,
+                da_,
+                half_length=half_length + extra_n,
+                dn=dn,
+                in_meters=in_meters,
             )
         except (KeyError, ValueError) as e:
             print(e)
             break
+        if bias_correction_ is not None:
+            jets_with_interp = (
+                jets_with_interp
+                .join(bias_correction_, on=[*index_columns, "jet ID", "index"])
+                .with_columns(n=pl.col("n") - pl.col("n_max"))
+                .filter(pl.col("n").abs() <= 2e6)
+                .with_columns(side=pl.col("n").sign().cast(pl.Int32()))
+                .drop("n_max")
+            )
+            jets_with_interp = jets_with_interp.filter(pl.col("n").abs() <= 2e6)
         jets_with_interp = interp_jets_to_zero_one(
             jets_with_interp, [varname, "is_polar"], n_interp=n_interp
         )
-        # jets_with_interp = jets_with_interp.group_by("time", pl.col("is_polar").mean().over(["time", "jet ID"]) > 0.5, "norm_index", "n", maintain_order=True).agg(pl.col(varname).mean())
         to_average.append(jets_with_interp)
-    return pl.concat(to_average).cast({"norm_index": pl.Float32(), "n": pl.Float32(), varname: pl.Float32()})
+    return pl.concat(to_average)
+
+
+def create_bias_correction(
+    jets,
+    ds,
+    period: int = 15
+):
+    offset = int(np.ceil(period / 2))
+    indexer = list(iterate_over_year_maybe_member(jets, ds))
+    to_average = []
+    index_columns = get_index_columns(
+        jets, 
+        (
+            "member",
+            "time",
+            "cluster",
+            "spell",
+            "relative_index",
+            "relative_time",
+            "sample_index",
+            "inside_index"
+        )
+    )
+    for idx1, idx2 in tqdm(indexer, total=len(indexer)):
+        jets_ = jets.filter(*idx1)
+        ds_ = ds.sel(**idx2)
+        sigma = compute_norm_derivative(ds_, "s").rename("sigma")
+        interpd = gather_normal_da_jets(
+            jets_, sigma, dn=1e5, half_length=4e5, in_meters=True
+        )
+        interpd = interp_jets_to_zero_one(
+            interpd, ["sigma_interp", "is_polar"], n_interp=30
+        )
+        mapper = interpd["norm_index"].unique().sort().to_frame().with_row_index("indexer")
+        bias_correction = (
+            interpd[*index_columns, "jet ID", "norm_index", "n", "sigma_interp"]
+            .join(mapper, on="norm_index")
+            .rolling("indexer", period=f"{period}i", offset=f"-{offset}i", group_by=(*index_columns, "jet ID", "n"))
+            .agg(pl.col("sigma_interp").mean())
+            .join(mapper, on="indexer")
+            .drop("indexer")
+        )
+        bias_correction = polars_to_xarray(bias_correction, ["time", "jet ID", "n", "norm_index"])
+        bias_correction = detect_contours(bias_correction, [0.], ("norm_index", "n"))
+        bias_correction = bias_correction.filter((pl.lit(0.).is_in(pl.col("norm_index").implode()) & pl.lit(1.).is_in(pl.col("norm_index").implode())).over("time", "jet ID", "contour"))
+        bias_correction.drop("level", "cyclic").group_by("time", "jet ID", "norm_index").agg(pl.col("n").get(pl.col("n").abs().arg_min()))
+        to_average.append(bias_correction)
+        return bias_correction
+    return pl.concat(to_average)
 
 
 # block 1: compute zeta
@@ -358,7 +441,7 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
             overturnings = pl.read_parquet(ofile)
             overturnings_on_grid = None
         else:
-            contours = detect_contours(zeta, levels, processes=N_WORKERS, ctx="fork")
+            contours = detect_contours_lonlat(zeta, levels, processes=N_WORKERS, ctx="fork")
             overturnings = detect_overturnings(contours, max_difflon=3)
             overturnings, overturnings_on_grid = event_props(overturnings, [zeta, mflux])
             overturnings.write_parquet(ofile)
@@ -423,7 +506,7 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
             streamers = pl.read_parquet(ofile)
             streamers_on_grid = None
         else:
-            contours = detect_contours(zeta, levels, processes=N_WORKERS, ctx="fork")
+            contours = detect_contours_lonlat(zeta, levels, processes=N_WORKERS, ctx="fork")
             streamers = detect_streamers(contours)
             streamers, streamers_on_grid = event_props(streamers, [zeta, mflux])
             streamers.write_parquet(ofile)
@@ -550,7 +633,8 @@ for run in ["ctrl", "dobl", "ctrl_p4"]:
             df_interp = gather_normal_da_jets(
                 df, ds[sources[0]], ds[sources[1]], half_length=half_length, dn=dn, in_meters=True
             )
-            agg = pl.col("angle").cos() * pl.col(f"{sources[0]}_interp") + pl.col("angle").sin() * pl.col(f"{sources[1]}_interp")
+            angle = pl.col("angle") - pl.lit(np.pi / 2)
+            agg = angle.cos() * pl.col(f"{sources[0]}_interp") + angle.sin() * pl.col(f"{sources[1]}_interp")
             agg = agg.cast(pl.Float32())
             
             df_interp = df_interp.with_columns(**{varname: agg}).drop(f"{sources[0]}_interp", f"{sources[1]}_interp")
