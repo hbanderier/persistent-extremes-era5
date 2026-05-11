@@ -193,7 +193,7 @@ def create_jet_relative_dataset(
     n_interp: int = 30,
     in_meters: bool = True,
 ):
-    indexer = list(iterate_over_year_maybe_member(jets, ds))
+    indexer = list(iterate_over_year_maybe_member(jets, da))
     to_average = []
     index_columns = get_index_columns(
         jets, 
