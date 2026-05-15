@@ -48,8 +48,3 @@ jets_coarse, _ , _, props_coarse = do_everything(ds, path_coarse, **coarse_kwarg
 jets_coarse_bc, _, _, props_coarse_bc = do_everything(ds, path_coarse_bc, **coarse_bc_kwargs)
 jets_coarse_bc_s, _, _, props_coarse_bc_s = do_everything(ds, path_coarse_bc_s, **coarse_bc_s_kwargs)
 jets_fine, _, _, props_fine = do_everything(ds, path_fine, **fine_kwargs)
-
-
-for jets in [jets_coarse, jets_coarse_bc, jets_coarse_bc_s, jets_fine]:
-    jets_with_s = create_jet_relative_dataset(jets, ds["s"], None, dn=5e4, n_interp=40)
-    jets_with_s

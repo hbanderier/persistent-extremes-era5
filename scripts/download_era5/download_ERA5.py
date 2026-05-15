@@ -1,6 +1,6 @@
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from jetutils.definitions import DATADIR
+from jetutils.definitions import DATADIR, N_WORKERS
 from cdsapi import Client
 
 basepath = Path(f"{DATADIR}/ERA5/plev/uv/6H")
@@ -27,9 +27,10 @@ def main():
     request = {
         "product_type": ["reanalysis"],
         "variable": [
+            "temperature",
             "u_component_of_wind",
             "v_component_of_wind",
-            "temperature",
+            "vertical_velocity"
         ],
         "year": "2023",
         "month": [
@@ -55,16 +56,16 @@ def main():
             "00:00", "06:00", "12:00",
             "18:00"
         ],
-        "pressure_level": ["250", "850"],
+        "pressure_level": ["250", "300", "350"],
         "data_format": "netcdf",
         "download_format": "unarchived",
-        "area": [90, -180, 0, 180],
+        "area": [90, -100, 0, 60],
         "grid": "0.5/0.5",
     }
     client = Client()
     with ThreadPoolExecutor(max_workers=1) as executor:
         futures = [
-            executor.submit(retrieve, client, request.copy(), year) for year in range(1973, 2025) # modify this if needed
+            executor.submit(retrieve, client, request.copy(), year, month) for year in range(1959, 2025) for month in range(1, 13) # modify this if needed
         ]
         for f in as_completed(futures):
             try:
