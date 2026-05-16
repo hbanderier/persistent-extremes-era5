@@ -294,11 +294,12 @@ for huh in to_do:
     da_ = open_da("ERA5", levtype, name, "6H", *args, **kwargs).rename(rename)
     if rename in ["APVO", "CPVO"]:
         da_ = da_.sel(lev=slice(320, 350)).any("lev")
-    interpd = create_jet_relative_dataset(jets, da_, bias_correction=bias_correction)
+    interpd = create_jet_relative_dataset(jets, da_, bias_correction=bias_correction, dn=5e4, n_interp=40)
     del da_
     interpd.write_parquet(ofile)
 
 ds_eddies = xr.open_dataset(f"{DATADIR}/ERA5/plev/eddy_stuff/6H/full.zarr")
+ds_eddies = ds_eddies.sel(lon=slice(None, 88))
 to_do = {
     "F1": ("F11", "F12"),
     "F2": ("F12", "F22"),
@@ -309,5 +310,5 @@ for dest, sources in tqdm(to_do.items()):
     if ofile.is_file():
         continue
     das = [ds_eddies[source] for source in sources]
-    interpd = create_jet_relative_dataset(jets, *das, bias_correction=bias_correction, align_2d=dest)
+    interpd = create_jet_relative_dataset(jets, *das, bias_correction=bias_correction, align_2d=dest, dn=5e4, n_interp=40)
     interpd.write_parquet(ofile)
