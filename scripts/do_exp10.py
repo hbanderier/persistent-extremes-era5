@@ -8,7 +8,7 @@ import numpy as np
 import polars as pl
 import xarray as xr
 from jetutils.data import open_da, smooth, extract, standardize
-from jetutils.definitions import DATADIR, YEARS, N_WORKERS, DEFAULT_VARNAME, OMEGA, C_P_AIR, KAPPA, degsin, compute, get_index_columns, polars_to_xarray
+from jetutils.definitions import RADIUS, DATADIR, YEARS, N_WORKERS, DEFAULT_VARNAME, OMEGA, C_P_AIR, KAPPA, degsin, compute, get_index_columns, polars_to_xarray, degcos
 from jetutils.derived_quantities import compute_absolute_vorticity, compute_2d_conv, compute_norm_derivative, convolve_dask
 from jetutils.geospatial import (
     gather_normal_da_jets,
@@ -116,6 +116,8 @@ if not odir.joinpath("full.zarr").is_dir():
         ds["F12"] = bigds["up"] * bigds["vp"]
         ds["F22"] = bigds["vp"] ** 2 - ds["EKE"]
         ds = xr.Dataset(ds)
+        for f in ["F11", "F12", "F22"]:
+            ds[f] = ds[f] * RADIUS * degcos(ds.lat)
         ds["hor1"] = compute_2d_conv(ds, "F11", "F12")
         ds["hor2"] = compute_2d_conv(ds, "F12", "F22")
         ds = compute(ds, progress_flag=False)
@@ -134,7 +136,7 @@ if not odir.joinpath("full.zarr").is_dir():
 # opath = Path(DATADIR, "Henrik_data", run) 
 # opath_rwb = Path(DATADIR, f"Henrik_data/{run}/rwb_index")
 # opath_rwb.mkdir(exist_ok=True)
-for year in trange(1969, 2021):
+for year in tqdm(YEARS):
     if True:
         continue
     ofile = opath_rwb.joinpath(f"overturnings_{year}.parquet")
@@ -274,8 +276,8 @@ args = ["all", None, -100, 60, 0, 88]
 to_do = (
     ("t2m", "surf", "t2m", {}),
     ("tp", "surf", "tp", {}),
-    ("pv330", "thetalev", "PV330", {}),
-    ("pv350", "thetalev", "PV350", {}),
+    ("PV330", "thetalev", "PV330", {}),
+    ("PV350", "thetalev", "PV350", {}),
     ("APVO", "thetalev", "APVO", {}),
     ("CPVO", "thetalev", "CPVO", {}),
     ("theta", "surf", ("alot2pvu", "theta"), {}),
@@ -289,24 +291,24 @@ for huh in to_do:
     ofile = path.joinpath(f"{rename}_relative.parquet")
     if ofile.is_file():
         continue
-    da_ = open_da("ERA5", levtype, name, "6H", *args, **kwargs).rename(rename)
+    da = open_da("ERA5", levtype, name, "6H", *args, **kwargs).rename(rename)
     if rename in ["APVO", "CPVO"]:
-        da_ = da_.sel(lev=slice(320, 350)).any("lev")
-    interpd = create_jet_relative_dataset(jets, da_, bias_correction=bias_correction, dn=5e4, n_interp=40)
-    del da_
+        da = da.sel(lev=slice(320, 350)).any("lev")
+    interpd = create_jet_relative_dataset(ph_jets, da, bias_correction=bias_correction, dn=1e5, n_interp=30)
+    del da
     interpd.write_parquet(ofile)
 
 ds_eddies = xr.open_dataset(f"{DATADIR}/ERA5/plev/eddy_stuff/6H/full.zarr")
-ds_eddies = ds_eddies.sel(lon=slice(None, 88))
+ds_eddies = ds_eddies.sel(lat=slice(None, 85))
 to_do = {
-    "F1": ("F11", "F12"),
-    "F2": ("F12", "F22"),
+    # "F1": ("F11", "F12"),
+    # "F2": ("F12", "F22"),
     "hor": ("hor1", "hor2"),
 }
-for dest, sources in tqdm(to_do.items()):
+for dest, sources in to_do.items():
     ofile = path.joinpath(f"{dest}_relative.parquet")
     if ofile.is_file():
         continue
     das = [ds_eddies[source] for source in sources]
-    interpd = create_jet_relative_dataset(jets, *das, bias_correction=bias_correction, align_2d=dest, dn=5e4, n_interp=40)
+    interpd = create_jet_relative_dataset(ph_jets, *das, bias_correction=bias_correction, align_2d=dest, dn=1e5, n_interp=30)
     interpd.write_parquet(ofile)
